@@ -93,11 +93,15 @@ fn test_render_main_keeps_composer_near_short_empty_transcript() {
         })
         .unwrap();
 
-    assert!(composer_area.y + composer_area.height < 11);
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.y, 0);
-    // 80 cols minus the 2-col accent gutter (no scrollbar column reserved).
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 78);
-    assert_eq!(app.transcript_width, 78);
+    // Near the short content, one row lower under the app-wide top margin.
+    assert!(composer_area.y + composer_area.height < 11 + APP_TOP_MARGIN);
+    assert_eq!(
+        app.transcript_hitbox.as_ref().unwrap().area.y,
+        APP_TOP_MARGIN
+    );
+    // 80 minus the 1-col left margin and 2-col right margin.
+    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 77);
+    assert_eq!(app.transcript_width, 77);
 }
 
 #[test]
@@ -783,7 +787,7 @@ async fn test_finish_deferred_until_typewriter_drains() {
 }
 
 #[test]
-fn test_render_main_paints_per_role_accent_gutter() {
+fn test_render_main_omits_accent_gutter_bars() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -813,36 +817,45 @@ fn test_render_main_paints_per_role_accent_gutter() {
         .unwrap();
     let buf = terminal.backend().buffer().clone();
 
-    // Collect the gutter column (x = 0): which rows carry a "▌" and in what color.
-    let mut user_bar_rows = 0;
-    let mut assistant_bar_rows = 0;
+    let row_text = |y: u16| -> String { (0..24u16).map(|x| buf[(x, y)].symbol()).collect() };
+
+    // The per-role accent bar is gone: no "▌" on any row.
     for y in 0..16u16 {
-        let cell = &buf[(0, y)];
-        if cell.symbol() != "▌" {
-            continue;
-        }
-        if cell.fg == USER() {
-            user_bar_rows += 1;
-        } else if cell.fg == ACCENT() {
-            assistant_bar_rows += 1;
+        for x in 0..24u16 {
+            assert_ne!(
+                buf[(x, y)].symbol(),
+                "▌",
+                "row {y} col {x} still paints an accent bar"
+            );
         }
     }
 
-    // User block is one row; assistant block wraps onto multiple rows and the
-    // accent bar must repeat on every wrapped continuation row, not just the
-    // first. Content is also inset past the gutter (no "▌" at the text origin).
-    assert_eq!(
-        user_bar_rows, 1,
-        "user block should show one blue accent bar"
-    );
+    // User turns marked `> ` (like the prompt), the agent `⏺ `; both in the same column.
+    let user_y = (0..16u16)
+        .find(|&y| row_text(y).contains("ping"))
+        .expect("user message row");
+    let user_row = row_text(user_y);
     assert!(
-        assistant_bar_rows >= 2,
-        "assistant bar must repeat on wrapped rows, got {assistant_bar_rows}"
+        user_row.contains("> ping"),
+        "user turn should carry a `> ` marker, got {user_row:?}"
     );
-    assert_ne!(
-        buf[(ACCENT_GUTTER_WIDTH, 0)].symbol(),
-        "▌",
-        "transcript text must render past the gutter"
+    assert_eq!(
+        user_row.find('>'),
+        Some(usize::from(APP_LEFT_MARGIN + ACCENT_GUTTER_WIDTH)),
+        "user marker should sit at the message column, got {user_row:?}"
+    );
+    let assistant_row = (0..16u16)
+        .map(row_text)
+        .find(|r| r.contains("alpha"))
+        .expect("assistant message row");
+    assert!(
+        assistant_row.contains("⏺ "),
+        "assistant turn should carry a `⏺ ` bullet, got {assistant_row:?}"
+    );
+    assert_eq!(
+        user_row.find('>'),
+        assistant_row.find('⏺'),
+        "user `>` and agent `⏺` markers must share a column"
     );
 }
 
@@ -875,9 +888,12 @@ fn test_render_main_uses_full_height_for_long_transcript() {
 
     // Composer bottom = height (12) minus the footer's single row.
     assert_eq!(composer_area.y + composer_area.height, 11);
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.y, 0);
-    // 80 cols minus the 2-col accent gutter; the overflow transcript keeps full
-    // width now that no scrollbar column is reserved.
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 78);
-    assert_eq!(app.transcript_width, 78);
+    // The overflow transcript starts under the app-wide top margin.
+    assert_eq!(
+        app.transcript_hitbox.as_ref().unwrap().area.y,
+        APP_TOP_MARGIN
+    );
+    // 80 minus the 1-col left margin and 2-col right margin.
+    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 77);
+    assert_eq!(app.transcript_width, 77);
 }

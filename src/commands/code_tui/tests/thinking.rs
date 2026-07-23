@@ -111,18 +111,23 @@ directory. I should check git status and recent git log."
     let think: Vec<&String> = wrapped
         .rows
         .iter()
-        .filter(|r| r.contains("git") || r.starts_with("✻"))
+        .filter(|r| r.contains("git") || r.trim_start().starts_with("✻"))
         .collect();
     assert!(
         think.len() >= 2,
         "the thought wrapped to multiple rows: {think:?}"
     );
-    assert!(think[0].starts_with("✻ "), "first row carries the marker");
-    // Every continuation row is indented (two spaces), never flush left.
+    // Thinking is a sub-block: the marker row nests two columns under the `⏺ ` turn.
+    assert!(
+        think[0].starts_with("  ✻ "),
+        "first row carries the nested marker: {:?}",
+        think[0]
+    );
+    // Every continuation row hangs under the nested marker, never flush left.
     for row in &think[1..] {
         assert!(
-            row.starts_with("  ") && !row.starts_with("✻"),
-            "wrapped row must hang-indent under the marker: {row:?}"
+            row.starts_with("    ") && !row.contains('✻'),
+            "wrapped row must hang-indent under the nested marker: {row:?}"
         );
     }
 }

@@ -390,8 +390,27 @@ pub(super) const TYPEWRITER_CATCHUP_DIVISOR: usize = 2;
 /// repaint; leftover events are drained on the next tick.
 pub(super) const MAX_INPUT_EVENTS_PER_TICK: usize = 512;
 
-// Left transcript gutter: 1 col for the per-role accent bar + 1 col of padding.
-pub(super) const ACCENT_GUTTER_WIDTH: u16 = 2;
+// No message indent (formerly the accent-bar gutter): turns sit flush at column 0,
+// so a user turn's `> ` marker lines up with the composer `> ` prompt below.
+pub(super) const ACCENT_GUTTER_WIDTH: u16 = 0;
+
+// The welcome header (banner + tip) is inset this many columns past the messages.
+pub(super) const HEADER_LEFT_INSET: u16 = 2;
+
+// Right margin so wrapped prose stops short of the terminal edge; chrome (divider,
+// composer, footer) stays full-bleed.
+pub(super) const TRANSCRIPT_RIGHT_MARGIN: u16 = 2;
+
+// One-column left margin for the whole main UI (transcript, composer, footer shift
+// together, keeping `> ` aligned) so markers don't hug the terminal edge.
+pub(super) const APP_LEFT_MARGIN: u16 = 1;
+
+// One blank row between the terminal top and the first content row.
+pub(super) const APP_TOP_MARGIN: u16 = 1;
+
+// Every non-main block (thinking, tool calls/results, shell, meta) nests this many
+// columns under the `> `/`⏺ ` turns — aligned with their body text.
+pub(super) const SUB_BLOCK_INDENT: u16 = 2;
 
 /// The pinned plan panel never crushes the transcript below this many rows, and
 /// its body is also capped at a fraction of the screen (see `plan_panel_height`).

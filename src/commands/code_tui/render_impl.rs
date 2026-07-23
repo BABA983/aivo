@@ -1,10 +1,10 @@
 use super::*;
 
-/// The text width a markdown table is laid out to fit, given the full transcript
-/// column width: drop the accent gutter. The transcript reserves no scrollbar
-/// column, so the full remaining width is available in every case.
+/// Width the transcript body is built to fit (tables, pre-wrapped turn blocks):
+/// full column minus left gutter and right margin. Must equal the paint-time text
+/// area's width, or pre-wrapped rows get re-broken flush at the gutter.
 fn table_layout_width(area_width: u16) -> u16 {
-    area_width.saturating_sub(ACCENT_GUTTER_WIDTH)
+    area_width.saturating_sub(ACCENT_GUTTER_WIDTH + TRANSCRIPT_RIGHT_MARGIN)
 }
 
 /// Replace every control-char cell (tab, ESC, …) with a space, keeping its
@@ -116,10 +116,20 @@ impl CodeTuiApp {
             return RenderedTranscript::new(lines, bars);
         }
 
-        push_transcript_intro(&mut lines, text_width);
+        // The welcome header (banner + tip) sits one column right of the messages:
+        // build it apart, indent it, then append.
+        let mut header = Vec::new();
+        push_transcript_intro(&mut header, text_width.saturating_sub(HEADER_LEFT_INSET));
         // Tip stays pinned above the conversation; frozen once non-empty, so safe
         // to memoize.
-        lines.extend(self.welcome_status_lines());
+        header.extend(self.welcome_status_lines());
+        lines.extend(header.into_iter().map(|line| {
+            if line.plain.is_empty() {
+                line
+            } else {
+                indent_styled_line(line, usize::from(HEADER_LEFT_INSET))
+            }
+        }));
         push_message_spacing(&mut lines);
         bars.resize(lines.len(), None);
 
@@ -181,7 +191,7 @@ impl CodeTuiApp {
                 if previous_model.is_some_and(|prev| prev != model) {
                     push_styled_line(
                         &mut lines,
-                        format!("model → {model}"),
+                        format!("  model → {model}"),
                         Style::default().fg(MUTED()).add_modifier(Modifier::ITALIC),
                     );
                     bars.push(None);
@@ -199,7 +209,7 @@ impl CodeTuiApp {
                     // show the compact `/name args` the user actually typed.
                     let label = super::skill_invocation_label(&message.content);
                     let shown = label.as_deref().unwrap_or(&message.content);
-                    render_user_message(&mut block, shown, &message.attachments);
+                    render_user_message(&mut block, shown, &message.attachments, text_width);
                 }
                 "assistant" => {
                     let reasoning = self
@@ -226,6 +236,7 @@ impl CodeTuiApp {
                             &message.content,
                             text_width,
                             role_bar_color("assistant"),
+                            true,
                         );
                     }
                 }
@@ -333,8 +344,20 @@ impl CodeTuiApp {
                 }
                 "plan" => render_plan(&mut block, &message.content),
                 "error" => render_error_message(&mut block, &message.content),
-                other => render_system_message(&mut block, other, &message.content, text_width),
+                other => render_system_message(
+                    &mut block,
+                    other,
+                    &message.content,
+                    text_width.saturating_sub(SUB_BLOCK_INDENT),
+                ),
             }
+            // User `> ` turns and `⏺ ` replies are main blocks; everything else in
+            // `block` (tool calls, shell, plan/error/system notes) nests under them.
+            let block = if message.role == "user" {
+                block
+            } else {
+                indent_sub_block(block)
+            };
             let bar = role_bar_color(message.role.as_str());
             push_block(&mut lines, &mut bars, block, Some(bar));
             // The `✶ Done in …` marker for a turn stamped on its last entry (which
@@ -353,7 +376,7 @@ impl CodeTuiApp {
                 push_styled_line(
                     &mut lines,
                     format!(
-                        "✶ Done in {}{note}",
+                        "  ✶ Done in {}{note}",
                         format_request_elapsed(std::time::Duration::from_millis(ms))
                     ),
                     Style::default().fg(MUTED()).add_modifier(Modifier::ITALIC),
@@ -394,8 +417,12 @@ impl CodeTuiApp {
                 lines.push(blank_line());
                 bars.push(None);
                 let mut block = Vec::new();
-                render_reasoning_window(&mut block, &self.pending_reasoning, text_width);
-                push_block(&mut lines, &mut bars, block, None);
+                render_reasoning_window(
+                    &mut block,
+                    &self.pending_reasoning,
+                    text_width.saturating_sub(SUB_BLOCK_INDENT),
+                );
+                push_block(&mut lines, &mut bars, indent_sub_block(block), None);
             }
         } else {
             // Answer started: show the same window above the streaming reply.
@@ -414,6 +441,7 @@ impl CodeTuiApp {
                 &self.pending_response,
                 text_width,
                 ACCENT(),
+                true,
             );
         }
         // A running `!cmd` streams its output here (not into history) so the
@@ -436,7 +464,12 @@ impl CodeTuiApp {
             })
             .to_string();
             render_local_command(&mut block, &content, OutputView::Live);
-            push_block(&mut lines, &mut bars, block, Some(SHELL()));
+            push_block(
+                &mut lines,
+                &mut bars,
+                indent_sub_block(block),
+                Some(SHELL()),
+            );
         }
         if let Some((color, _)) = notice_display(self.notice.as_ref()) {
             lines.push(blank_line());
@@ -445,7 +478,7 @@ impl CodeTuiApp {
             if let Some(spans) = notice_spans(self.notice.as_ref()) {
                 block.push(line_with_plain(spans));
             }
-            push_block(&mut lines, &mut bars, block, Some(color));
+            push_block(&mut lines, &mut bars, indent_sub_block(block), Some(color));
         }
         (lines, bars)
     }
@@ -862,7 +895,7 @@ impl CodeTuiApp {
             return;
         }
         let body = self.build_transcript_history_body(table_layout_width(area_width));
-        let plain_width = area_width.saturating_sub(ACCENT_GUTTER_WIDTH).max(1);
+        let plain_width = table_layout_width(area_width).max(1);
         let plain_prepass = wrap_plain_lines(&body.plain_lines, plain_width).len();
         self.render_cache.transcript = Some(TranscriptCache {
             fp,
@@ -1955,6 +1988,14 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_main(&mut self, frame: &mut Frame<'_>, area: Rect) -> Rect {
+        // One shared left + top margin so markers don't hug the edge; hitboxes
+        // derive from the inset area, so mouse mapping follows automatically.
+        let area = Rect {
+            x: area.x.saturating_add(APP_LEFT_MARGIN),
+            y: area.y.saturating_add(APP_TOP_MARGIN),
+            width: area.width.saturating_sub(APP_LEFT_MARGIN),
+            height: area.height.saturating_sub(APP_TOP_MARGIN),
+        };
         let composer_height = self.composer_height(area.width);
         // The footer is a single fixed row: just the status line. No hint bar, so
         // the layout never shifts up or down as turns start and finish.
@@ -2080,9 +2121,8 @@ impl CodeTuiApp {
         let view_height = transcript_view_area.height.max(1);
         // The transcript uses its full width — no column reserved for a scrollbar.
         let transcript_content_area = transcript_view_area;
-        // Reserve a left gutter for per-role accent bars. Content wraps and
-        // renders into the inset text area; the bars are painted separately so
-        // they never bleed into copied/selected text.
+        // Inset text area: a fixed left margin (formerly the accent-bar gutter) plus
+        // a right margin so wrapped prose never touches the terminal edge.
         let transcript_text_area = Rect {
             x: transcript_content_area
                 .x
@@ -2090,7 +2130,7 @@ impl CodeTuiApp {
             y: transcript_content_area.y,
             width: transcript_content_area
                 .width
-                .saturating_sub(ACCENT_GUTTER_WIDTH)
+                .saturating_sub(ACCENT_GUTTER_WIDTH + TRANSCRIPT_RIGHT_MARGIN)
                 .max(1),
             height: transcript_content_area.height,
         };
@@ -2100,7 +2140,9 @@ impl CodeTuiApp {
         // per frame.
         self.ensure_transcript_wrap(transcript_text_area.width);
         self.ensure_volatile_tail_wrap(transcript_text_area.width);
-        let (wrapped_text, visual_rows, visual_bars) =
+        // `_visual_bars` (per-role gutter colours) is no longer painted here, but
+        // stays in the shared row model since preview/export still use it.
+        let (wrapped_text, visual_rows, _visual_bars) =
             self.composed_transcript_rows(spinner.as_ref(), transcript_text_area.width);
         let transcript_total_lines = visual_rows.len();
         self.transcript_width = transcript_text_area.width.max(1);
@@ -2148,13 +2190,6 @@ impl CodeTuiApp {
             let visible_text = Text::from(wrapped_text.lines[view_start..view_end].to_vec());
             let transcript_widget = Paragraph::new(visible_text).style(Style::default().fg(TEXT()));
             frame.render_widget(transcript_widget, transcript_text_area);
-            self.paint_accent_gutter(
-                frame,
-                transcript_content_area.x,
-                transcript_text_area.y,
-                transcript_text_area.height,
-                &visual_bars,
-            );
             self.render_transcript_selection_highlight(frame, transcript_text_area);
             // Clickable jump-to-bottom pill (like Ctrl+End), only while scrolled up.
             self.jump_to_bottom_hit = if self.transcript_scroll < max_scroll {
@@ -2357,7 +2392,8 @@ impl CodeTuiApp {
             .saturating_sub(reserved)
             .min(area.height / 3)
             .max(1);
-        content_rows.clamp(1, max_body).saturating_add(1) // + top rule
+        // + blank, top rule, blank — the rule breathes on both sides.
+        content_rows.clamp(1, max_body).saturating_add(3)
     }
 
     /// Paint the pinned plan panel: a faint top rule (fencing it off from the
@@ -2369,6 +2405,8 @@ impl CodeTuiApp {
             return;
         }
         clear_to_canvas(frame, area);
+        // A blank row above and below the rule so it doesn't crowd the transcript
+        // or the panel header.
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "─".repeat(usize::from(area.width.max(1))),
@@ -2376,16 +2414,19 @@ impl CodeTuiApp {
             ))),
             Rect {
                 x: area.x,
-                y: area.y,
+                y: area
+                    .y
+                    .saturating_add(1)
+                    .min(area.bottom().saturating_sub(1)),
                 width: area.width,
                 height: 1,
             },
         );
         let body = Rect {
             x: area.x.saturating_add(1),
-            y: area.y.saturating_add(1),
+            y: area.y.saturating_add(3),
             width: area.width.saturating_sub(2).max(1),
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(3),
         };
         if body.height == 0 {
             return;
@@ -2537,29 +2578,6 @@ impl CodeTuiApp {
             .unwrap_or_default()
     }
 
-    /// Paint a `▌` accent bar in the reserved gutter column for each visible
-    /// transcript row, colored by the role of the block that owns that row.
-    fn paint_accent_gutter(
-        &self,
-        frame: &mut Frame<'_>,
-        gutter_x: u16,
-        top_y: u16,
-        view_height: u16,
-        bars: &[Option<Color>],
-    ) {
-        let buffer = frame.buffer_mut();
-        for offset in 0..view_height {
-            let row_index = self.transcript_scroll + usize::from(offset);
-            let Some(Some(color)) = bars.get(row_index).copied() else {
-                continue;
-            };
-            if let Some(cell) = buffer.cell_mut((gutter_x, top_y.saturating_add(offset))) {
-                cell.set_symbol("▌");
-                cell.set_fg(color);
-            }
-        }
-    }
-
     /// Auto-clears the selection once the post-copy flash window elapses, so a
     /// just-copied selection briefly lights up then disappears (amp-style).
     pub(super) fn tick_selection_flash(&mut self) {
@@ -2674,10 +2692,12 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
+        // Same inset as the intro banner (see `build_transcript_history_body`), so
+        // the banner doesn't jump once a message lands.
         let content_area = Rect {
-            x: area.x,
+            x: area.x.saturating_add(HEADER_LEFT_INSET),
             y: area.y.saturating_add(EMPTY_STATE_TOP_GAP),
-            width: area.width,
+            width: area.width.saturating_sub(HEADER_LEFT_INSET),
             height: area
                 .height
                 .saturating_sub(EMPTY_STATE_TOP_GAP)

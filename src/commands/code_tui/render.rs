@@ -614,7 +614,7 @@ pub(super) fn session_preview_lines(
             "user" if !message.content.trim().is_empty() || !message.attachments.is_empty() => {
                 spacing(&mut lines, &mut bars, prev_role, "user");
                 let mut block = Vec::new();
-                render_user_message(&mut block, &message.content, &message.attachments);
+                render_user_message(&mut block, &message.content, &message.attachments, width);
                 push_block(&mut lines, &mut bars, block, Some(USER()));
                 prev_role = Some("user");
                 index += 1;
@@ -639,17 +639,22 @@ pub(super) fn render_user_message(
     lines: &mut Vec<StyledLine>,
     content: &str,
     attachments: &[MessageAttachment],
+    width: u16,
 ) {
-    // No `> ` marker: the message renders as plain text and the role is carried
-    // entirely by the lavender gutter bar, so a user turn reads as clean prose.
-    let mut had_line = false;
-    for raw_line in content.lines() {
-        push_styled_line(lines, raw_line.to_string(), Style::default().fg(TEXT()));
-        had_line = true;
+    // `> ` in the composer-prompt style, so an echoed turn lines up under the caret.
+    let mut block: Vec<StyledLine> = content
+        .lines()
+        .map(|raw| line_plain(raw.to_string(), Style::default().fg(TEXT())))
+        .collect();
+    if block.is_empty() {
+        block.push(line_plain(String::new(), Style::default().fg(TEXT())));
     }
-    if !had_line {
-        push_styled_line(lines, String::new(), Style::default().fg(TEXT()));
-    }
+    lines.extend(mark_block(
+        block,
+        width.saturating_sub(TURN_MARKER_W),
+        "> ",
+        Style::default().fg(USER()).add_modifier(Modifier::BOLD),
+    ));
     render_user_attachment_lines(lines, attachments);
 }
 
@@ -786,9 +791,56 @@ pub(super) struct ReasoningView<'a> {
     pub(super) expanded: bool,
 }
 
+/// Column cost of a turn marker (glyph + trailing space): `⏺ ` reply, `> ` user.
+pub(super) const TURN_MARKER_W: u16 = 2;
+
+/// Prefix the first non-blank row with `marker`, hang-indent the rest by its width.
+/// Pre-wraps to `body_width` so the transcript wrapper never re-breaks a marked row.
+fn mark_block(
+    block: Vec<StyledLine>,
+    body_width: u16,
+    marker: &'static str,
+    marker_style: Style,
+) -> Vec<StyledLine> {
+    let indent = " ".repeat(usize::from(row_display_width(marker)));
+    // width 0 before the first frame → skip wrapping; the paint-time wrapper sizes them.
+    let wrap_w = usize::from(body_width);
+    let mut out = Vec::new();
+    let mut marked = false;
+    for sl in block {
+        let rows = if wrap_w >= 2 {
+            wrap_styled_line(&sl.line.spans, wrap_w)
+        } else {
+            vec![sl]
+        };
+        for mut row in rows {
+            let (lead, lead_plain) = if !marked && !row.plain.trim().is_empty() {
+                marked = true;
+                (
+                    Span::styled(marker.to_string(), marker_style),
+                    marker.to_string(),
+                )
+            } else {
+                (
+                    Span::styled(indent.clone(), Style::default()),
+                    indent.clone(),
+                )
+            };
+            let mut spans = vec![lead];
+            spans.append(&mut row.line.spans);
+            out.push(StyledLine {
+                line: Line::from(spans),
+                plain: format!("{lead_plain}{}", row.plain),
+            });
+        }
+    }
+    out
+}
+
 /// Push an assistant turn as up to two blocks: the thinking block is barless so it
 /// recedes as meta; the answer carries `content_bar`. Separate blocks keep the
-/// answer's bar from bleeding up into the reasoning.
+/// answer's bar from bleeding up into the reasoning. `mark` adds the `⏺ ` reply
+/// bullet; plan cards reuse this without it.
 pub(super) fn push_assistant_blocks(
     lines: &mut Vec<StyledLine>,
     bars: &mut Vec<Option<Color>>,
@@ -796,15 +848,18 @@ pub(super) fn push_assistant_blocks(
     content: &str,
     width: u16,
     content_bar: Color,
+    mark: bool,
 ) {
     if let Some(view) = reasoning.filter(|v| reasoning_is_substantive(v.text)) {
         let mut block = Vec::new();
+        // Thinking nests under the `⏺ ` answer: build to the inset width, then indent.
+        let nested_width = width.saturating_sub(SUB_BLOCK_INDENT);
         if view.expanded {
-            render_reasoning_full(&mut block, view.text, width);
+            render_reasoning_full(&mut block, view.text, nested_width);
         } else {
-            render_reasoning_window(&mut block, view.text, width);
+            render_reasoning_window(&mut block, view.text, nested_width);
         }
-        push_block(lines, bars, block, None);
+        push_block(lines, bars, indent_sub_block(block), None);
         if !content.is_empty() {
             lines.push(blank_line());
             bars.push(None);
@@ -813,7 +868,17 @@ pub(super) fn push_assistant_blocks(
 
     if !content.is_empty() {
         let mut block = Vec::new();
-        render_assistant_message(&mut block, None, content, width);
+        let body_width = if mark {
+            width.saturating_sub(TURN_MARKER_W)
+        } else {
+            width
+        };
+        render_assistant_message(&mut block, None, content, body_width);
+        let block = if mark {
+            mark_block(block, body_width, "⏺ ", Style::default().fg(ACCENT()))
+        } else {
+            block
+        };
         push_block(lines, bars, block, Some(content_bar));
     }
 }
@@ -1017,7 +1082,7 @@ pub(super) fn render_tool_call(
     } else {
         Style::default().fg(MUTED())
     };
-    let mut spans = vec![Span::styled("→ ".to_string(), Style::default().fg(TOOL()))];
+    let mut spans = vec![Span::styled("→ ".to_string(), Style::default().fg(MUTED()))];
     if name == "subagent" {
         // A delegated task reads as the task itself — "subagent" is jargon and the
         // arrow already marks it as a step. Show the task in place of the verb.
@@ -1148,7 +1213,7 @@ pub(super) fn render_tool_call_group(
         Style::default().fg(MUTED())
     };
     let mut spans = vec![
-        Span::styled("→ ".to_string(), Style::default().fg(TOOL())),
+        Span::styled("→ ".to_string(), Style::default().fg(MUTED())),
         Span::styled(head, verb_style),
     ];
     let list = join_targets(targets, 56);
@@ -1487,7 +1552,7 @@ pub(super) fn render_local_command(
     lines.push(line_with_plain(vec![
         Span::styled(
             "! ".to_string(),
-            Style::default().fg(SHELL()).add_modifier(Modifier::BOLD),
+            Style::default().fg(MUTED()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(command.to_string(), Style::default().fg(TEXT())),
     ]));
@@ -2016,7 +2081,7 @@ pub(super) fn review_body_lines(
         for d in &diffs {
             out.push(Line::from(Span::styled(
                 format!("  {}", d.path),
-                Style::default().fg(TOOL()).add_modifier(Modifier::BOLD),
+                Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
             )));
             let rows = build_hunk(&d.old, &d.new, None, CONTEXT);
             if rows.is_empty() {
@@ -2153,8 +2218,41 @@ fn diff_num_width<'a>(rows: impl IntoIterator<Item = &'a DiffRow>) -> usize {
     }
 }
 
-/// Render one diff row. `numw` is the shared number-column width (0 = no column,
-/// for entries that predate line-number capture).
+/// Prepend `n` blank columns; `.plain` stays in lockstep for selection mapping.
+pub(super) fn indent_styled_line(sl: StyledLine, n: usize) -> StyledLine {
+    if n == 0 {
+        return sl;
+    }
+    let pad = " ".repeat(n);
+    let mut spans = vec![Span::styled(pad.clone(), Style::default())];
+    spans.extend(sl.line.spans);
+    StyledLine {
+        line: Line::from(spans),
+        plain: format!("{pad}{}", sl.plain),
+    }
+}
+
+/// Nest a tool's diff/detail two columns under its `→ verb` call.
+fn indent_tool_detail(sl: StyledLine) -> StyledLine {
+    indent_styled_line(sl, 2)
+}
+
+/// Nest an activity block under the `> `/`⏺ ` turn; blank rows stay empty so
+/// copied text and spacing detection keep working.
+pub(super) fn indent_sub_block(block: Vec<StyledLine>) -> Vec<StyledLine> {
+    block
+        .into_iter()
+        .map(|sl| {
+            if sl.plain.is_empty() {
+                sl
+            } else {
+                indent_styled_line(sl, usize::from(SUB_BLOCK_INDENT))
+            }
+        })
+        .collect()
+}
+
+/// Render one diff row. `numw` is the shared number-column width (0 = no column).
 fn render_diff_row(row: &DiffRow, numw: usize) -> StyledLine {
     let num_span = |num: Option<usize>| -> Option<Span<'static>> {
         (numw > 0).then(|| {
@@ -2288,10 +2386,10 @@ fn render_edit_diff(
         return;
     }
 
-    // No outer indent so a wrapped changed line stays a single flush block.
+    // Indent two under the `→ verb` call so the diff nests with the tool.
     let numw = diff_num_width(&rows);
     for row in rows.iter().take(MAX_DIFF_LINES) {
-        lines.push(render_diff_row(row, numw));
+        lines.push(indent_tool_detail(render_diff_row(row, numw)));
     }
     if rows.len() > MAX_DIFF_LINES {
         lines.push(line_with_plain(vec![Span::styled(
@@ -2337,13 +2435,14 @@ fn render_patch_diff(
         Item::Header(_) => None,
     }));
     for item in items.iter().take(MAX_LINES) {
-        lines.push(match item {
+        let line = match item {
             Item::Header(path) => line_with_plain(vec![Span::styled(
-                format!("  {path}"),
-                Style::default().fg(TOOL()),
+                path.clone(),
+                Style::default().fg(MUTED()),
             )]),
             Item::Row(row) => render_diff_row(row, numw),
-        });
+        };
+        lines.push(indent_tool_detail(line));
     }
     if items.len() > MAX_LINES {
         lines.push(line_with_plain(vec![Span::styled(
@@ -2366,10 +2465,10 @@ pub(super) fn push_plan_card(
     push_styled_line(
         lines,
         "Implementation plan",
-        Style::default().fg(TOOL()).add_modifier(Modifier::BOLD),
+        Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
     );
     bars.push(Some(TOOL()));
-    push_assistant_blocks(lines, bars, reasoning, content, width, TOOL());
+    push_assistant_blocks(lines, bars, reasoning, content, width, TOOL(), false);
     if let Some(footer) = footer {
         push_styled_line(lines, footer, Style::default().fg(FAINT()));
         bars.push(Some(TOOL()));
@@ -2439,7 +2538,7 @@ pub(super) fn render_plan(lines: &mut Vec<StyledLine>, content: &str) {
     lines.push(line_with_plain(vec![
         Span::styled(
             "Plan".to_string(),
-            Style::default().fg(TOOL()).add_modifier(Modifier::BOLD),
+            Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {done}/{} done", items.len()),
@@ -2462,7 +2561,7 @@ pub(super) fn render_plan(lines: &mut Vec<StyledLine>, content: &str) {
             ),
             "in_progress" => (
                 "▸",
-                TOOL(),
+                TEXT(),
                 Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
             ),
             _ => ("○", MUTED(), Style::default().fg(MUTED())),
