@@ -408,7 +408,7 @@ fn test_session_preview_lines_collapses_tool_runs() {
         preview_chat_message("tool_call", "{\"name\":\"read_file\"}"),
         preview_chat_message("assistant", "done"),
     ];
-    let (lines, bars) = session_preview_lines(&messages, 60, true);
+    let lines = session_preview_lines(&messages, 60, true);
     let plain: Vec<&str> = lines.iter().map(|l| l.plain.as_str()).collect();
 
     assert!(
@@ -416,22 +416,17 @@ fn test_session_preview_lines_collapses_tool_runs() {
         "truncation banner missing: {plain:?}"
     );
     assert!(
-        plain.iter().any(|l| l.contains("⚙ 3 tool steps")),
-        "tool run should collapse to one line: {plain:?}"
+        plain.contains(&"  ⚙ 3 tool steps"),
+        "tool run should collapse to one nested line: {plain:?}"
     );
     assert!(
-        plain.iter().any(|l| l.contains("hi back")),
-        "assistant markdown missing: {plain:?}"
+        plain.iter().any(|l| l.starts_with("⏺ hi back")),
+        "assistant turn should lead with the ⏺ marker: {plain:?}"
     );
     assert!(
-        plain.iter().any(|l| l.contains("hello there")),
-        "user message missing: {plain:?}"
+        plain.iter().any(|l| l.starts_with("❯ hello there")),
+        "user turn should lead with the ❯ marker: {plain:?}"
     );
-    let tool_row = plain
-        .iter()
-        .position(|l| l.contains("⚙ 3 tool steps"))
-        .unwrap();
-    assert_eq!(bars[tool_row], Some(TOOL()));
 }
 
 #[tokio::test]

@@ -2090,10 +2090,8 @@ impl CodeTuiApp {
     }
 
     pub(super) fn push_newline(&mut self) {
-        if !self.draft.is_empty() {
-            self.leave_history_navigation();
-            self.insert_char_at_cursor('\n');
-        }
+        self.leave_history_navigation();
+        self.insert_char_at_cursor('\n');
     }
 
     pub(super) fn reset_composer(&mut self) {

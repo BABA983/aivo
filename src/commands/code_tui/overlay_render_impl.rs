@@ -2648,24 +2648,12 @@ fn render_session_preview_pane(
         return 0;
     }
 
-    // Wrap at width-2, then prefix each visual row with its 2-col role gutter.
-    let text_width = body.width.saturating_sub(2).max(1);
-    let (lines, bars) = session_preview_lines(&entry.messages, text_width, entry.truncated);
-    let wrapped = wrap_transcript(&lines, &bars, text_width);
-    let rows: Vec<Line> = wrapped
-        .text
-        .lines
-        .into_iter()
-        .zip(wrapped.bars.iter())
-        .map(|(line, bar)| {
-            let mut spans = vec![match bar {
-                Some(color) => Span::styled("▎ ", Style::default().fg(*color)),
-                None => Span::raw("  "),
-            }];
-            spans.extend(line.spans);
-            Line::from(spans)
-        })
-        .collect();
+    // Turn markers sit at the pane's left edge (the live transcript's layout);
+    // sub-lines nest +2, so no role gutter is added here.
+    let text_width = body.width.max(1);
+    let lines = session_preview_lines(&entry.messages, text_width, entry.truncated);
+    let wrapped = wrap_transcript(&lines, &[], text_width);
+    let rows = wrapped.text.lines;
 
     // Bottom anchor: 0 pins the tail; render_detail_lines' clamp, upside down.
     let total = rows.len();

@@ -558,33 +558,32 @@ pub(super) fn composer_attachment_lines(attachments: &[MessageAttachment]) -> Ve
         .collect()
 }
 
-/// `/resume` preview transcript: user/assistant render like the main transcript,
-/// a tool run collapses to one `⚙ n tool steps` line, reasoning/plan skipped.
+/// `/resume` preview transcript, in the live transcript's marker style: user
+/// turns lead with `❯ `, assistant turns with `⏺ `, a tool run collapses to one
+/// nested `⚙ n tool steps` line, reasoning/plan skipped.
 pub(super) fn session_preview_lines(
     messages: &[ChatMessage],
     width: u16,
     truncated: bool,
-) -> (Vec<StyledLine>, Vec<Option<Color>>) {
-    fn spacing(
-        lines: &mut Vec<StyledLine>,
-        bars: &mut Vec<Option<Color>>,
-        prev: Option<&str>,
-        next: &str,
-    ) {
+) -> Vec<StyledLine> {
+    fn push_trimmed(lines: &mut Vec<StyledLine>, mut block: Vec<StyledLine>) {
+        while block.last().is_some_and(|l| l.plain.trim().is_empty()) {
+            block.pop();
+        }
+        lines.extend(block);
+    }
+    fn spacing(lines: &mut Vec<StyledLine>, prev: Option<&str>, next: &str) {
         if should_add_message_spacing(prev, next) {
             push_message_spacing(lines);
-            bars.resize(lines.len(), None);
         }
     }
 
     let mut lines: Vec<StyledLine> = Vec::new();
-    let mut bars: Vec<Option<Color>> = Vec::new();
     if truncated {
         lines.push(line_plain(
-            "· earlier messages not shown ·".to_string(),
+            "  · earlier messages not shown ·".to_string(),
             Style::default().fg(FAINT()),
         ));
-        bars.push(None);
     }
     let mut prev_role: Option<&str> = None;
     let mut index = 0;
@@ -599,31 +598,30 @@ pub(super) fn session_preview_lines(
                     steps += 1;
                     index += 1;
                 }
-                spacing(&mut lines, &mut bars, prev_role, "tool_call");
-                push_block(
-                    &mut lines,
-                    &mut bars,
-                    vec![line_plain(
-                        format!("⚙ {steps} tool step{}", if steps == 1 { "" } else { "s" }),
-                        Style::default().fg(MUTED()),
-                    )],
-                    Some(TOOL()),
-                );
+                spacing(&mut lines, prev_role, "tool_call");
+                lines.push(line_plain(
+                    format!("  ⚙ {steps} tool step{}", if steps == 1 { "" } else { "s" }),
+                    Style::default().fg(MUTED()),
+                ));
                 prev_role = Some("tool_result");
             }
             "user" if !message.content.trim().is_empty() || !message.attachments.is_empty() => {
-                spacing(&mut lines, &mut bars, prev_role, "user");
+                spacing(&mut lines, prev_role, "user");
                 let mut block = Vec::new();
                 render_user_message(&mut block, &message.content, &message.attachments, width);
-                push_block(&mut lines, &mut bars, block, Some(USER()));
+                push_trimmed(&mut lines, block);
                 prev_role = Some("user");
                 index += 1;
             }
             "assistant" if !message.content.trim().is_empty() => {
-                spacing(&mut lines, &mut bars, prev_role, "assistant");
+                spacing(&mut lines, prev_role, "assistant");
+                let body_width = width.saturating_sub(TURN_MARKER_W);
                 let mut block = Vec::new();
-                render_assistant_message(&mut block, None, &message.content, width);
-                push_block(&mut lines, &mut bars, block, Some(ACCENT()));
+                render_assistant_message(&mut block, None, &message.content, body_width);
+                push_trimmed(
+                    &mut lines,
+                    mark_block(block, body_width, "⏺ ", Style::default().fg(ACCENT())),
+                );
                 prev_role = Some("assistant");
                 index += 1;
             }
@@ -632,7 +630,7 @@ pub(super) fn session_preview_lines(
             }
         }
     }
-    (lines, bars)
+    lines
 }
 
 pub(super) fn render_user_message(
