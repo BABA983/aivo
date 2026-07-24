@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.42.0
+
+A coding-agent polish release with reach beyond the desktop. `aivo serve` now serves Cursor keys through the ACP bridge, so a headless or remote host can drive Cursor the same way the local TUI does — with remote-driven shells kept inside the shadow env where they belong. Plan mode grows a memory: `/plan save`, a continue-or-discard prompt on `/new`, and resume from a saved file or an interrupted plan. The system prompt is sharpened with restraint and voice rules. The code TUI gets a broad visual pass — rounded composer chrome (and the prompt glyph retired, since the cursor is enough), a regrouped footer that closes the composer with a rule and fits chrome down to phone widths, flush turn markers with the accent gutter dropped, and tighter spacing across the parallel status line, auto-approve badge, and app edges. Rounding out the release: Windows parity fixes for login, shadow state, secrets, and jobs, plus macOS shadow fixes that restore real user env and global git config in shells spawned under shadows.
+
+- feat(serve): serve cursor keys through the ACP bridge (f9e776a4)
+- feat(code): /plan save, /new continue prompt, resume from file or interrupted plan (41a7c636)
+- feat(agent): sharpen system prompt with restraint and voice rules (af79f862)
+- feat(windows): parity fixes for login, shadow state, secrets, jobs (752c4a46)
+- feat(code): regroup footer, close composer with a rule, fit chrome to phones (adda0fe3)
+- feat(code): refine composer with rounded chrome (d4b75616)
+- feat(code): drop the composer prompt glyph (f7e12d57)
+- refactor(code): flush turn markers, drop accent gutter, app margins (ab273ee1)
+- fix(code): Ctrl+J on empty composer, drop /resume preview role bars (99c8da53)
+- fix(serve): keep remote-driven cursor shells inside the shadow env (1d3de5e8)
+- fix(cursor): restore real user env in shells spawned under shadows (9995027f)
+- fix(cursor): preserve global git config in macOS shadows (f5e6339b)
+- fix(code): tighten main UI edge spacing (aaf6bfb2)
+- fix(code): refine parallel status line (2af177ac)
+- fix(code): tighten auto-approve badge spacing (67c805c2)
+
 ## v0.41.6
 
 A coding-agent and plan-mode quality release. Unfinished plans now resume across sessions and you can exit plan mode live, mid-turn — a plan no longer traps the turn it started in. The `keys add` flow gets friendlier: it suggests a short name when you omit one, and `--key` becomes `--api-key` (the old spelling still works). The code TUI keeps the model honest about still-running background jobs each turn, keeps tool results glued to their calls in mixed parallel batches, and clears the stale queued tip when a queue row is deleted or recalled. Rounding out the release: honest exit codes for `ping`/`serve`/`account` with a unified skip-confirm flag, and expired-credential errors now point you at `aivo keys reauth`.
