@@ -886,8 +886,18 @@ fn test_render_main_uses_full_height_for_long_transcript() {
         })
         .unwrap();
 
-    // Composer bottom = height (12) minus the footer's single row.
-    assert_eq!(composer_area.y + composer_area.height, 11);
+    // Composer input bottom = height (12) minus the footer row and the
+    // composer's closing rule.
+    assert_eq!(composer_area.y + composer_area.height, 10);
+    // The row under the input is the closing rule, boxing the composer.
+    let buf = terminal.backend().buffer();
+    let rule_row: String = (0..buf.area.width)
+        .map(|x| buf.cell((x, 10)).unwrap().symbol().to_string())
+        .collect();
+    assert!(
+        !rule_row.trim().is_empty() && rule_row.trim().chars().all(|c| c == '─'),
+        "closing rule row: {rule_row:?}"
+    );
     // The overflow transcript starts under the app-wide top margin.
     assert_eq!(
         app.transcript_hitbox.as_ref().unwrap().area.y,

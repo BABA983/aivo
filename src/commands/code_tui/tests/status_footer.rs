@@ -213,20 +213,110 @@ fn test_footer_shows_short_session_id_only_on_wide_terminals() {
 }
 
 #[test]
-fn test_welcome_status_lines_include_static_essentials_hint() {
+fn test_welcome_tip_wraps_whole_on_narrow_terminals() {
+    // With no essentials hint below it, the tip wraps in full on a phone; the
+    // empty-state pane must size to the wrapped rows, not clip the tail.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = make_test_app(tx, rx);
-    let plain: Vec<String> = app
-        .welcome_status_lines()
-        .into_iter()
-        .map(|sl| sl.plain)
-        .collect();
+    let mut app = make_test_app(tx, rx);
+    app.welcome_tip_index = 0; // "start a line with ! to run a shell command"
+
+    let (screen, _) = render_full_screen(&mut app, 36, 22);
+    assert!(screen.contains("✶ Tip"), "tip line missing:\n{screen}");
+    assert!(screen.contains("command"), "tip tail clipped:\n{screen}");
     assert!(
-        plain
-            .iter()
-            .any(|l| l.contains("/help commands") && l.contains("Shift+Tab modes")),
-        "essentials hint missing from welcome: {plain:?}"
+        !screen.contains("/help commands"),
+        "essentials line should be gone:\n{screen}"
     );
+}
+
+#[test]
+fn test_composer_rule_drops_cycle_hint_when_narrow() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.agent_auto_approve = true;
+
+    fn plain(line: ratatui::text::Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+    // Wide: badge + keybinding hint inset on the rule.
+    assert!(plain(app.composer_rule_line(80)).contains("⚡ auto-approve (shift+tab)"));
+    // Phone-width: the hint goes first; the badge stays inset on the rule.
+    let narrow = plain(app.composer_rule_line(44));
+    assert!(
+        narrow.contains("⚡ auto-approve"),
+        "narrow rule: {narrow:?}"
+    );
+    assert!(!narrow.contains("shift+tab"), "narrow rule: {narrow:?}");
+    assert!(narrow.starts_with('─'), "still reads as a rule: {narrow:?}");
+    // Too narrow even for that: the bare badge.
+    assert_eq!(plain(app.composer_rule_line(18)), "⚡ auto-approve");
+}
+
+#[test]
+fn test_footer_groups_workspace_left_engine_right() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.raw_model = "gpt-4o".to_string();
+    app.key.name = "my-router".to_string();
+    app.cwd = "/tmp/project".to_string();
+    app.git_branch = Some("main".to_string());
+    app.session_id = "abcdef12-3456-7890-abcd-ef1234567890".to_string();
+    app.context_window = 200_000;
+    app.context_tokens = 50_000;
+    app.context_is_estimate = false;
+    app.model_supports_thinking = false; // no effort tier in this scenario
+    app.agent_tools_enabled = true; // no plain-chat badge
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+    terminal
+        .draw(|frame| app.render_footer(frame, frame.area()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let row: String = (0..buf.area.width)
+        .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+        .collect();
+    // Workspace cluster left: where the agent acts, then the session handle.
+    assert!(
+        row.starts_with("/tmp/project (main) · #abcdef12"),
+        "footer: {row:?}"
+    );
+    // Engine cluster right: model · key, with the meter holding the corner.
+    assert!(
+        row.trim_end().ends_with("gpt-4o · my-router · 50k/200k"),
+        "footer: {row:?}"
+    );
+}
+
+#[test]
+fn test_footer_meter_anchors_right_corner_with_inset() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.context_window = 1_000_000;
+    app.context_tokens = 50_000;
+    app.context_is_estimate = false;
+    app.thinking_enabled = true;
+    app.model_supports_thinking = true;
+    app.model_reasoning_efforts = vec!["high".to_string()];
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+    terminal
+        .draw(|frame| app.render_footer(frame, frame.area()))
+        .unwrap();
+    let buf = terminal.backend().buffer();
+    let row: String = (0..buf.area.width)
+        .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+        .collect();
+    // The meter — the one element that warms with fill — holds the corner; the
+    // static effort tier sits a step inside it.
+    assert!(row.trim_end().ends_with("high · 50k/1M"), "footer: {row:?}");
+    // One column of right inset mirrors the app's left margin.
+    assert_eq!(buf.cell((99, 0)).unwrap().symbol(), " ", "footer: {row:?}");
 }
 
 #[test]

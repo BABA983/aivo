@@ -105,55 +105,57 @@ pub(super) fn estimate_context_tokens(history: &[ChatMessage]) -> u64 {
     total as u64
 }
 
-pub(super) fn build_footer_text(
+/// The engine cluster's identity: the model label plus (when it adds anything)
+/// the key/host segment. A key named after the model or its `owner/` prefix,
+/// or an `hf:owner/repo` ref ending in the model, collapses to one label —
+/// the model id alone already carries the provider.
+pub(super) fn footer_engine_labels(
     model: &str,
     base_url: &str,
     key_name: &str,
-    cwd: &str,
-    branch: Option<&str>,
-    width: u16,
-) -> String {
+) -> (String, Option<String>) {
     // Prefer the user's key name; fall back to the provider host from the URL.
     let host = if key_name.trim().is_empty() {
         footer_host_label(base_url)
     } else {
         key_name.trim().to_string()
     };
-    // Prefer the full (home-abbreviated) path so the agent's working dir is clear;
-    // fall back to the basename, then drop the cwd, as width shrinks.
+    if host.is_empty() {
+        return (model.to_string(), None);
+    }
+    // Local HF model: key name `hf:owner/repo` already ends in the model, so
+    // lead with the ref (which subsumes the model name).
+    if host
+        .strip_prefix("hf:")
+        .is_some_and(|repo| repo.rsplit('/').next() == Some(model))
+    {
+        return (host, None);
+    }
+    let is_redundant_key = host.eq_ignore_ascii_case(model)
+        || model
+            .split_once('/')
+            .is_some_and(|(owner, _)| owner.eq_ignore_ascii_case(&host));
+    if is_redundant_key {
+        return (model.to_string(), None);
+    }
+    (model.to_string(), Some(host))
+}
+
+/// The workspace cluster's cwd text, best-first: the full (home-abbreviated)
+/// path with the git branch, the basename with the branch, then the bare
+/// basename as the width tightens.
+pub(super) fn footer_workspace_candidates(cwd: &str, branch: Option<&str>) -> [String; 3] {
     let cwd_full = footer_cwd_label(cwd);
     let cwd_base = footer_cwd_basename(cwd);
-    // When the cwd is a git repo, the branch trails the path as ` (branch)`. It's
-    // kept alongside the basename fallback, then dropped as the width tightens.
     let branch_suffix = branch
         .filter(|b| !b.is_empty())
         .map(|b| format!(" ({b})"))
         .unwrap_or_default();
-    // Local HF model: key name `hf:owner/repo` already ends in the model, so drop
-    // the duplicate and lead with the ref.
-    let is_redundant_hf = host
-        .strip_prefix("hf:")
-        .is_some_and(|repo| repo.rsplit('/').next() == Some(model));
-    let lead = if is_redundant_hf {
-        host.clone()
-    } else {
-        format!("{model} · {host}")
-    };
-    let candidates = [
-        format!("{lead} · {cwd_full}{branch_suffix}"),
-        format!("{lead} · {cwd_base}{branch_suffix}"),
-        format!("{lead} · {cwd_base}"),
-        lead.clone(),
-        model.to_string(),
-    ];
-
-    candidates
-        .into_iter()
-        // `width` is a terminal-column budget, so pick by display width — a CJK
-        // path/model (each glyph 2 columns) would otherwise count as half its
-        // real width and be chosen even though it overflows the footer.
-        .find(|candidate| display_width(candidate) <= usize::from(width.max(1)))
-        .unwrap_or_else(|| truncate_for_width(model, width))
+    [
+        format!("{cwd_full}{branch_suffix}"),
+        format!("{cwd_base}{branch_suffix}"),
+        cwd_base,
+    ]
 }
 
 /// The footer's session-id handle (the full id lives in the `/session` overlay):
@@ -360,10 +362,10 @@ pub(super) fn truncate_for_width(text: &str, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_footer_text, display_width, footer_session_label, format_request_elapsed,
-        format_session_match_count, format_time_ago_short, format_token_count,
-        format_token_count_value, format_usd, git_branch_for, truncate_for_display_width,
-        truncate_for_width,
+        display_width, footer_engine_labels, footer_session_label, footer_workspace_candidates,
+        format_request_elapsed, format_session_match_count, format_time_ago_short,
+        format_token_count, format_token_count_value, format_usd, git_branch_for,
+        truncate_for_display_width, truncate_for_width,
     };
     use crate::commands::code::TokenUsage;
     use chrono::{Duration as ChronoDuration, Utc};
@@ -404,197 +406,70 @@ mod tests {
     }
 
     #[test]
-    fn test_build_footer_text_prefers_whole_segments() {
-        // Wide: the full path (so an agent's working dir is unambiguous).
+    fn test_footer_engine_labels_split_and_dedupe() {
+        // Distinct key name: model + host segments.
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                None,
-                80
-            ),
-            "gpt-4o · openrouter.ai · /tmp/project"
+            footer_engine_labels("gpt-4o", "https://openrouter.ai/api/v1", "my-router"),
+            ("gpt-4o".to_string(), Some("my-router".to_string()))
         );
-        // Medium: full path won't fit → fall back to the basename.
+        // Blank key name falls back to the URL host.
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                None,
-                34
-            ),
-            "gpt-4o · openrouter.ai · project"
+            footer_engine_labels("gpt-4o", "https://openrouter.ai/api/v1", "  "),
+            ("gpt-4o".to_string(), Some("openrouter.ai".to_string()))
         );
-        // Narrow: drop the cwd.
+        // A key named after the model's `owner/` prefix would print the same
+        // word twice (`aivo/starter · aivo`) — the host segment is dropped.
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                None,
-                22
-            ),
-            "gpt-4o · openrouter.ai"
+            footer_engine_labels("aivo/starter", "https://api.getaivo.dev/v1", "aivo"),
+            ("aivo/starter".to_string(), None)
         );
-        // Tiny: model only.
+        // …or a key named exactly after the model, case-insensitively.
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                None,
-                6
-            ),
-            "gpt-4o"
+            footer_engine_labels("GPT-4o", "https://api.openai.com/v1", "gpt-4o"),
+            ("GPT-4o".to_string(), None)
         );
-    }
-
-    #[test]
-    fn test_build_footer_text_collapses_redundant_hf_ref() {
-        // A local HF model's key name (`hf:owner/repo`) has the model as its
-        // basename — the footer collapses the duplicated model into the ref.
+        // A local HF key (`hf:owner/repo`) ending in the model subsumes it.
         assert_eq!(
-            build_footer_text(
+            footer_engine_labels(
                 "Qwen2.5-0.5B-Instruct-GGUF",
                 "http://127.0.0.1:8080/v1",
-                "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "/tmp/project",
-                Some("main"),
-                80,
+                "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF"
             ),
-            "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF · /tmp/project (main)"
+            ("hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF".to_string(), None)
         );
-        // Tiniest width degrades to the bare model name, not the long ref.
+        // A non-matching hf basename is not treated as redundant (both kept).
         assert_eq!(
-            build_footer_text(
-                "Qwen2.5-0.5B-Instruct-GGUF",
-                "http://127.0.0.1:8080/v1",
-                "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "/tmp/project",
-                Some("main"),
-                26,
-            ),
-            "Qwen2.5-0.5B-Instruct-GGUF"
-        );
-        // A non-matching basename is not treated as redundant (both kept).
-        assert_eq!(
-            build_footer_text(
+            footer_engine_labels(
                 "some-model",
                 "http://127.0.0.1:8080/v1",
-                "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-                "/tmp/project",
-                None,
-                80,
+                "hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF"
             ),
-            "some-model · hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF · /tmp/project"
+            (
+                "some-model".to_string(),
+                Some("hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF".to_string())
+            )
         );
     }
 
     #[test]
-    fn test_build_footer_text_appends_git_branch() {
-        // Wide: the branch trails the full path as ` (branch)`.
+    fn test_footer_workspace_candidates_degrade() {
+        // Best-first: full path with branch, basename with branch, bare basename.
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                Some("feat/agent"),
-                80
-            ),
-            "gpt-4o · openrouter.ai · /tmp/project (feat/agent)"
-        );
-        // The branch is kept alongside the basename when the full path won't fit.
-        assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                Some("main"),
-                40
-            ),
-            "gpt-4o · openrouter.ai · project (main)"
-        );
-        // Tighter: drop the branch before the basename.
-        assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                Some("main"),
-                35
-            ),
-            "gpt-4o · openrouter.ai · project"
+            footer_workspace_candidates("/tmp/project", Some("feat/agent")),
+            [
+                "/tmp/project (feat/agent)".to_string(),
+                "project (feat/agent)".to_string(),
+                "project".to_string(),
+            ]
         );
         // Empty branch → no suffix (same as None / not a repo).
         assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "",
-                "/tmp/project",
-                Some(""),
-                80
-            ),
-            "gpt-4o · openrouter.ai · /tmp/project"
-        );
-    }
-
-    #[test]
-    fn test_build_footer_text_prefers_key_name_over_host() {
-        // A non-empty key name replaces the URL-derived host.
-        assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "my-router",
-                "/tmp/project",
-                None,
-                80
-            ),
-            "gpt-4o · my-router · /tmp/project"
-        );
-        // Blank/whitespace name falls back to the host.
-        assert_eq!(
-            build_footer_text(
-                "gpt-4o",
-                "https://openrouter.ai/api/v1",
-                "  ",
-                "/tmp/project",
-                None,
-                80
-            ),
-            "gpt-4o · openrouter.ai · /tmp/project"
-        );
-    }
-
-    #[test]
-    fn test_build_footer_text_uses_display_width_for_cjk() {
-        // A CJK cwd: each glyph is 2 columns, so the full-path candidate is 34
-        // columns wide while only 32 chars. With width=32 a char-count check
-        // would wrongly keep it (32 ≤ 32) and overflow the footer; display width
-        // must fall back to the basename, which fits.
-        let out = build_footer_text(
-            "gpt-4o",
-            "https://openrouter.ai/api/v1",
-            "",
-            "/tmp/项目",
-            None,
-            32,
-        );
-        assert_eq!(out, "gpt-4o · openrouter.ai · 项目");
-        assert!(
-            display_width(&out) <= 32,
-            "footer overflows {} cols",
-            display_width(&out)
+            footer_workspace_candidates("/tmp/project", Some("")),
+            [
+                "/tmp/project".to_string(),
+                "project".to_string(),
+                "project".to_string(),
+            ]
         );
     }
 

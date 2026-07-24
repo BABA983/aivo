@@ -2262,16 +2262,15 @@ impl CodeTuiApp {
             self.render_queued_panel(frame, queue_panel_area, &queue_lines);
         }
 
-        // A blank spacing row, then the divider rule, then the input. The blank
-        // row gives the prompt one line of breathing room above its divider —
-        // matching the single blank line the transcript leaves between blocks —
-        // instead of the rule pressing directly against the last message.
+        // Blank spacing row, top rule, input, then a bottom rule closing the
+        // composer into a box (open at the sides so `> ` keeps its column).
         let composer_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(1),
+                Constraint::Length(1),
             ])
             .split(composer_outer);
 
@@ -2279,6 +2278,15 @@ impl CodeTuiApp {
         frame.render_widget(
             Paragraph::new(self.composer_rule_line(composer_chunks[1].width.max(1))),
             composer_chunks[1],
+        );
+        // Plain chrome (badges live on the top rule), but shares the tint so a
+        // tinted box reads as one shape.
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "─".repeat(usize::from(composer_chunks[3].width)),
+                self.composer_rule_style(),
+            ))),
+            composer_chunks[3],
         );
 
         let composer_area = composer_chunks[2];
@@ -2301,26 +2309,26 @@ impl CodeTuiApp {
         composer_area
     }
 
-    /// The divider rule above the composer. It always carries the auto-approve
-    /// mode badge, inset near the right end — amber "on" when active, a faint
-    /// "⇧⇥ … off" (naming the toggle key) when not — so the mode and how to
-    /// change it are always discoverable. It gets this fixed home above the input
-    /// rather than the hint bar, which drops its right-hand items on narrow
-    /// terminals.
-    pub(super) fn composer_rule_line(&self, width: u16) -> Line<'static> {
-        let width = usize::from(width);
-        // In `!cmd` shell mode the prompt's top line picks up the magenta shell
-        // hue; in plan mode the whole rule tints ACCENT so the read-only session is
-        // unmistakable. Shell wins (the tinted draft must match).
-        // Plan mode from either backend: in-process engine or cursor's ACP mode.
-        let plan_mode = self.plan_mode || self.cursor_plan_mode;
-        let rule_style = if self.draft_is_shell_command() {
+    /// Hue shared by the composer's top and bottom rules: shell mode tints
+    /// magenta (shell wins, matching the tinted draft), plan mode tints ACCENT,
+    /// else quiet FAINT.
+    pub(super) fn composer_rule_style(&self) -> Style {
+        if self.draft_is_shell_command() {
             Style::default().fg(SHELL())
-        } else if plan_mode {
+        } else if self.plan_mode || self.cursor_plan_mode {
             Style::default().fg(ACCENT())
         } else {
             Style::default().fg(FAINT())
-        };
+        }
+    }
+
+    /// The divider rule above the composer, always carrying the auto-approve
+    /// badge inset near the right end so the mode and its toggle key stay
+    /// discoverable (the hint bar drops right-hand items when narrow).
+    pub(super) fn composer_rule_line(&self, width: u16) -> Line<'static> {
+        let width = usize::from(width);
+        let plan_mode = self.plan_mode || self.cursor_plan_mode;
+        let rule_style = self.composer_rule_style();
         // The mode badge — one slot, since the four modes are exclusive.
         let (badge, badge_style) = if plan_mode {
             (
@@ -2335,14 +2343,9 @@ impl CodeTuiApp {
             ("normal", Style::default().fg(MUTED()))
         };
         const CYCLE_HINT: &str = " (shift+tab)";
-        // Left title on the rule. While recalling input history, show
-        // `History {pos}/{total}` — the newest entry reads as total/total and
-        // counts down as you scroll further back — preceded by two rule dashes
-        // so it reads as a titled divider (matching the recall affordance).
-        // Otherwise, a live `/goal` step indicator pinned to the very left so an
-        // unattended loop is always visible (not just in a transient notice).
-        // The two never coincide in one frame: history recall is a foreground
-        // composer action.
+        // Left title: `History {pos}/{total}` while recalling input (counts down
+        // as you scroll back), else a live `/goal` step indicator so an
+        // unattended loop stays visible. Never both in one frame.
         let (left_text, left_style, left_lead) = if let Some(index) = self.draft_history_index {
             (
                 format!(" History {}/{} ", index + 1, self.draft_history.len()),
@@ -2358,7 +2361,7 @@ impl CodeTuiApp {
         } else {
             (String::new(), Style::default(), 0usize)
         };
-        // Left-cluster badge for running jobs (count cached + reaped per event-loop tick).
+        // Left-cluster badge for running jobs.
         let jobs_running = self.jobs_running;
         let jobs_text = if jobs_running > 0 {
             let s = if jobs_running == 1 { "" } else { "s" };
@@ -2368,19 +2371,24 @@ impl CodeTuiApp {
         };
         let jobs_w = display_width(&jobs_text);
         let trailing = 2usize;
-        // Badge + faint cycle hint, one space of padding each side.
-        let badge_w = display_width(badge) + display_width(CYCLE_HINT) + 2;
         let left_w = if left_text.is_empty() {
             0
         } else {
             left_lead + display_width(&left_text)
         };
-        if width <= left_w + jobs_w + badge_w + trailing + 2 {
+        // The keybinding hint drops first on a narrow terminal — the badge alone
+        // still names the mode — and again when the left cluster crowds it.
+        let mut hint = if width >= 60 { CYCLE_HINT } else { "" };
+        let badge_w = |hint: &str| display_width(badge) + display_width(hint) + 2;
+        if !hint.is_empty() && width <= left_w + jobs_w + badge_w(hint) + trailing + 2 {
+            hint = "";
+        }
+        if width <= left_w + jobs_w + badge_w(hint) + trailing + 2 {
             // Too narrow to inset it all — keep just the mode badge.
             return Line::from(Span::styled(badge.to_string(), badge_style));
         }
-        let fill = width - left_w - jobs_w - badge_w - trailing;
-        let mut spans = Vec::with_capacity(7);
+        let fill = width - left_w - jobs_w - badge_w(hint) - trailing;
+        let mut spans = Vec::with_capacity(8);
         if !left_text.is_empty() {
             if left_lead > 0 {
                 spans.push(Span::styled("─".repeat(left_lead), rule_style));
@@ -2392,10 +2400,10 @@ impl CodeTuiApp {
         }
         spans.push(Span::styled("─".repeat(fill), rule_style));
         spans.push(Span::styled(format!(" {badge}"), badge_style));
-        spans.push(Span::styled(
-            format!("{CYCLE_HINT} "),
-            Style::default().fg(FAINT()),
-        ));
+        if !hint.is_empty() {
+            spans.push(Span::styled(hint.to_string(), Style::default().fg(FAINT())));
+        }
+        spans.push(Span::raw(" "));
         spans.push(Span::styled("─".repeat(trailing), rule_style));
         Line::from(spans)
     }
@@ -2598,13 +2606,17 @@ impl CodeTuiApp {
             rows.extend(self.spinner_status_plain_lines(content_width));
             wrap_plain_lines(&rows, content_width).len() as u16
         } else {
-            // Inset width, matching what `render_empty_state` draws into.
-            let mut rows = self.transcript_intro_lines(width.saturating_sub(ACCENT_GUTTER_WIDTH));
+            // Measure at the column `render_empty_state` draws into; any wider
+            // undercounts wrapped rows and clips the tip on narrow terminals.
+            let empty_content_width = width
+                .saturating_sub(ACCENT_GUTTER_WIDTH + TRANSCRIPT_RIGHT_MARGIN + HEADER_LEFT_INSET)
+                .max(1);
+            let mut rows = self.transcript_intro_lines(empty_content_width);
             // Reserve the chip + tip height too, matching `render_empty_state`.
             rows.extend(self.welcome_status_lines().into_iter().map(|sl| sl.plain));
-            rows.extend(self.notice_plain_lines(content_width));
-            rows.extend(self.spinner_status_plain_lines(content_width));
-            wrap_plain_lines(&rows, content_width).len() as u16
+            rows.extend(self.notice_plain_lines(empty_content_width));
+            rows.extend(self.spinner_status_plain_lines(empty_content_width));
+            wrap_plain_lines(&rows, empty_content_width).len() as u16
         };
         height = height
             .saturating_add(EMPTY_STATE_TOP_GAP)
@@ -2785,8 +2797,9 @@ impl CodeTuiApp {
                 )),
             ]
         } else {
-            // `area` is the gutter-inset column, driving the full/narrow choice.
-            brand_wordmark_lines(area.width)
+            // Pick full/narrow at the banner's real render width; the wider
+            // `area.width` would let the wordmark wrap and push the tip offscreen.
+            brand_wordmark_lines(content_area.width)
                 .into_iter()
                 .map(|sl| sl.line)
                 .collect()
@@ -2860,11 +2873,6 @@ impl CodeTuiApp {
             Span::styled("✶ Tip  ", Style::default().fg(ACCENT())),
             Span::styled(tip.to_string(), Style::default().fg(MUTED())),
         ]));
-        // Static essentials a new user needs before any rotating tip matters.
-        lines.push(line_plain(
-            "       /help commands · Shift+Tab modes".to_string(),
-            Style::default().fg(FAINT()),
-        ));
         lines
     }
 
@@ -2986,104 +2994,135 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_footer(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        // Cleared here so a frame that doesn't draw the id (narrow terminal) leaves
-        // no stale click target; re-armed below when it's shown.
+        // One column of right inset mirrors APP_LEFT_MARGIN on the far side.
+        let area = Rect {
+            width: area.width.saturating_sub(1),
+            ..area
+        };
+        // Cleared so a frame that omits the id leaves no stale click target;
+        // re-armed below when shown.
         self.session_id_hit = None;
-        // Right side: the context meter (which warms toward the window limit) and,
-        // when thinking is on, the effort tier. The effort is a static setting, so
-        // it stays quiet MUTED — only the meter's warning/error warmth draws the eye.
+        let width = usize::from(area.width);
+        let glue_w = 3usize; // " · "
+
+        // Right cluster — the engine: model, key/host, MCP health, effort, then
+        // the context meter anchoring the corner (the one element that warms
+        // toward the limit, so its warning color sits at the edge).
         let (meter_label, meter_color) = self.footer_status_label();
-        let mut right_spans: Vec<Span<'static>> = Vec::new();
-        // Extras are width-gated so the meter and model win on narrow terminals.
-        let mut session_id_width = 0u16;
-        if area.width >= 90 && !self.session_id.is_empty() {
-            // A fork keeps its source in view (`claude·a1b2c3d4`); a native id shows
-            // its short handle (`#3f2a1b4c`). Click it for the full detail overlay.
-            let label = footer_session_label(&self.session_id);
-            session_id_width = display_width(&label) as u16;
-            right_spans.push(Span::styled(label, Style::default().fg(FAINT())));
-            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
-        }
+        let (model_label, host_label) =
+            footer_engine_labels(&self.raw_model, &self.key.base_url, &self.key.name);
+        // Tail right of the model: width-gated so the model and meter win when narrow.
+        let mut tail: Vec<Span<'static>> = Vec::new();
         if area.width >= 70
             && let Some((mcp_label, mcp_color)) = self.footer_mcp_label()
         {
-            right_spans.push(Span::styled(mcp_label, Style::default().fg(mcp_color)));
-            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            tail.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            tail.push(Span::styled(mcp_label, Style::default().fg(mcp_color)));
         }
-        right_spans.push(Span::styled(meter_label, Style::default().fg(meter_color)));
         if let Some(effort) = self.footer_effort_label() {
-            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
-            right_spans.push(Span::styled(effort, Style::default().fg(MUTED())));
+            // A static setting: FAINT, a step under the meter it introduces.
+            tail.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            tail.push(Span::styled(effort, Style::default().fg(FAINT())));
         }
-        let right_label_width: u16 = right_spans
-            .iter()
-            .map(|s| display_width(s.content.as_ref()) as u16)
-            .sum();
-        let left_width = if right_label_width == 0 {
-            area.width
-        } else {
-            area.width.saturating_sub(right_label_width + 1)
-        };
-        // The session id is the first right span, laid out one column past the
-        // left cluster's fill — record its rect so a click opens the detail overlay.
-        if session_id_width > 0 {
-            self.session_id_hit = Some(Rect {
-                x: area.x + left_width + 1,
-                y: area.y,
-                width: session_id_width,
-                height: area.height.max(1),
-            });
-        }
-        // Reserve columns for the model-line badges so the text truncates to fit them.
+        tail.push(Span::styled(" · ", Style::default().fg(FAINT())));
+        tail.push(Span::styled(meter_label, Style::default().fg(meter_color)));
+        let tail_w: usize = tail.iter().map(|s| display_width(s.content.as_ref())).sum();
         let live = self.share.handle.is_some();
         let plain_chat = !self.agent_tools_enabled;
-        let glue = 3u16; // " · " between the model and each badge
         let badge_w = if live {
-            display_width(LIVE_BADGE) as u16 + glue
+            display_width(LIVE_BADGE) + glue_w
         } else {
             0
         } + if plain_chat {
-            display_width(PLAIN_CODE_BADGE) as u16 + glue
+            display_width(PLAIN_CODE_BADGE) + glue_w
         } else {
             0
         };
-        let left_text = build_footer_text(
-            &self.raw_model,
-            &self.key.base_url,
-            &self.key.name,
-            self.display_cwd(),
-            self.git_branch.as_deref(),
-            left_width.saturating_sub(badge_w),
+        // The host segment is the first thing dropped, then the model itself
+        // truncates, so the meter never leaves the corner.
+        let host = host_label.filter(|h| {
+            display_width(&model_label) + badge_w + glue_w + display_width(h) + tail_w <= width
+        });
+        let host_w = host
+            .as_ref()
+            .map(|h| glue_w + display_width(h))
+            .unwrap_or(0);
+        let model_shown = truncate_for_display_width(
+            &model_label,
+            width.saturating_sub(badge_w + host_w + tail_w).max(1),
         );
-        // Status-line: the model name and host/cwd context share one MUTED hue,
-        // with the ` · ` glue receding to FAINT between segments.
+        let mut right_spans: Vec<Span<'static>> = Vec::new();
+        right_spans.push(Span::styled(model_shown, Style::default().fg(MUTED())));
+        // Badges sit right after the model they qualify.
+        if live {
+            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            right_spans.push(Span::styled(LIVE_BADGE, Style::default().fg(LIVE())));
+        }
+        if plain_chat {
+            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            right_spans.push(Span::styled(PLAIN_CODE_BADGE, Style::default().fg(USER())));
+        }
+        if let Some(host) = host {
+            right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            right_spans.push(Span::styled(host, Style::default().fg(FAINT())));
+        }
+        right_spans.extend(tail);
+        let right_w: usize = right_spans
+            .iter()
+            .map(|s| display_width(s.content.as_ref()))
+            .sum();
+
+        // Left cluster — the workspace: cwd (branch) degrading to basename, plus
+        // the clickable session-id handle behind a width gate. Cedes the row to
+        // the engine side when narrow.
+        let left_budget = width.saturating_sub(right_w + 1);
+        // A fork keeps its source in view (`claude·a1b2c3d4`); a native id shows
+        // its short handle (`#3f2a1b4c`). Click it for the full detail overlay.
+        let id_label = (area.width >= 90 && !self.session_id.is_empty())
+            .then(|| footer_session_label(&self.session_id));
+        let id_w = id_label
+            .as_ref()
+            .map(|id| glue_w + display_width(id))
+            .unwrap_or(0);
+        let candidates =
+            footer_workspace_candidates(self.display_cwd(), self.git_branch.as_deref());
+        // Keep the id only while a cwd candidate leaves room for it.
+        let chosen = candidates
+            .iter()
+            .find(|c| display_width(c) + id_w <= left_budget)
+            .map(|c| (c.clone(), id_label.is_some()))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|c| display_width(c) <= left_budget)
+                    .map(|c| (c.clone(), false))
+            });
         let mut spans: Vec<Span<'static>> = Vec::new();
-        for (index, segment) in left_text.split(" · ").enumerate() {
-            if index > 0 {
-                spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+        let mut left_w = 0usize;
+        if let Some((cwd_text, show_id)) = chosen {
+            if !cwd_text.is_empty() {
+                left_w = display_width(&cwd_text);
+                spans.push(Span::styled(cwd_text, Style::default().fg(MUTED())));
             }
-            spans.push(Span::styled(
-                segment.to_string(),
-                Style::default().fg(MUTED()),
-            ));
-            // Badges sit right after the model (first segment).
-            if index == 0 {
-                if live {
+            if show_id && let Some(id) = id_label.as_ref() {
+                if left_w > 0 {
                     spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
-                    spans.push(Span::styled(LIVE_BADGE, Style::default().fg(LIVE())));
+                    left_w += glue_w;
                 }
-                if plain_chat {
-                    spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
-                    spans.push(Span::styled(PLAIN_CODE_BADGE, Style::default().fg(USER())));
-                }
+                self.session_id_hit = Some(Rect {
+                    x: area.x + left_w as u16,
+                    y: area.y,
+                    width: display_width(id) as u16,
+                    height: area.height.max(1),
+                });
+                spans.push(Span::styled(id.clone(), Style::default().fg(FAINT())));
+                left_w += display_width(id);
             }
         }
-        let left_len = display_width(&left_text) as u16 + badge_w;
-        let pad = left_width.saturating_sub(left_len);
-        if right_label_width > 0 {
-            spans.push(Span::raw(" ".repeat(usize::from(pad) + 1)));
-            spans.extend(right_spans);
-        }
+        spans.push(Span::raw(
+            " ".repeat(width.saturating_sub(left_w + right_w)),
+        ));
+        spans.extend(right_spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
@@ -3248,9 +3287,8 @@ impl CodeTuiApp {
             composer_visual_rows(&self.draft, text_width).len()
         };
         let lines = (draft_rows + self.draft_attachments.len()) as u16;
-        // +3 reserves the leading blank spacing row, the divider rule, and one
-        // trailing row below the input; the rest is draft text (capped, then it
-        // scrolls within the box).
+        // +3 reserves the leading blank spacing row and the top and bottom
+        // rules; the rest is draft text (capped, then it scrolls within the box).
         (lines + 3).clamp(4, 10)
     }
 
