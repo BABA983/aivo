@@ -239,14 +239,14 @@ fn test_composer_rule_drops_cycle_hint_when_narrow() {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
     // Wide: badge + keybinding hint inset on the rule.
-    assert!(plain(app.composer_rule_line(80)).contains("⚡auto-approve (shift+tab)"));
+    assert!(plain(app.composer_rule_line(80)).contains("↯ auto-approve (shift+tab)"));
     // Phone-width: the hint goes first; the badge stays inset on the rule.
     let narrow = plain(app.composer_rule_line(44));
-    assert!(narrow.contains("⚡auto-approve"), "narrow rule: {narrow:?}");
+    assert!(narrow.contains("↯ auto-approve"), "narrow rule: {narrow:?}");
     assert!(!narrow.contains("shift+tab"), "narrow rule: {narrow:?}");
     assert!(narrow.starts_with('─'), "still reads as a rule: {narrow:?}");
     // Too narrow even for that: the bare badge.
-    assert_eq!(plain(app.composer_rule_line(18)), "⚡auto-approve");
+    assert_eq!(plain(app.composer_rule_line(18)), "↯ auto-approve");
 }
 
 #[test]
@@ -1347,11 +1347,10 @@ fn test_footer_is_single_status_row() {
     );
     // The mode badge rides the composer rule, not the footer, and every mode is
     // shown so the current state + its cycle key stay discoverable.
-    // Matched by each badge's unique glyph: a wide glyph splits across buffer
-    // cells (breaking adjacent-text matches) and the rotating welcome tip can
+    // Matched by each badge's unique glyph: the rotating welcome tip can
     // contain the bare mode words.
     assert!(
-        full_screen(|a| a.agent_auto_approve = true).contains('⚡'),
+        full_screen(|a| a.agent_auto_approve = true).contains('↯'),
         "auto badge on composer rule"
     );
     assert!(
@@ -1363,7 +1362,7 @@ fn test_footer_is_single_status_row() {
         "review badge on composer rule"
     );
     assert!(
-        !footer_text(|a| a.agent_auto_approve = true).contains('⚡'),
+        !footer_text(|a| a.agent_auto_approve = true).contains('↯'),
         "the mode badge is not in the footer"
     );
     // Effort tier (bare value) shows on the status line only when thinking is on.

@@ -2334,7 +2334,7 @@ impl CodeTuiApp {
                 Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD),
             )
         } else if self.agent_auto_approve {
-            ("⚡auto-approve", Style::default().fg(WARNING()))
+            ("↯ auto-approve", Style::default().fg(WARNING()))
         } else if self.agent_review_edits {
             ("✎ review", Style::default().fg(TOOL()))
         } else {
