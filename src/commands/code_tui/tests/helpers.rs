@@ -28,6 +28,11 @@ pub(super) fn make_test_app(
     app
 }
 
+/// The current notice's text ("" when none) — assertion sugar.
+pub(super) fn notice_text(app: &CodeTuiApp) -> &str {
+    app.notice.as_ref().map(|(_, n)| n.as_str()).unwrap_or("")
+}
+
 /// Pin dispatch to the plain-chat path (image in history + unknown vision), so
 /// tests don't touch the agent-engine build (real config/git).
 pub(super) fn pin_to_plain_chat(app: &mut CodeTuiApp) {

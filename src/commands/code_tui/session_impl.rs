@@ -305,7 +305,7 @@ is preserved."
         self.refresh_context_window().await;
 
         if self.history.is_empty() {
-            self.start_new_chat();
+            self.start_new_chat().await;
             return Ok(());
         }
 
@@ -2670,6 +2670,11 @@ is preserved."
         if plan.is_none() && !self.plan_state_written.get() {
             return;
         }
+        // Plan finished or discarded: retire the managed `/plan save` file too
+        // (explicit-path saves are the user's own).
+        if plan.is_none() {
+            remove_managed_plan_files(self.session_store.config_dir(), &self.session_id, None);
+        }
         let _ = self
             .session_store
             .set_plan_state(&self.session_id, plan.as_ref())
@@ -2755,6 +2760,9 @@ is preserved."
         // session's thread (`/new` and key/model switches reset it the same way).
         self.agent_engine = None;
         self.cards.clear_agent_cards();
+        // Drop the `/new` continue prompt — `y` here would inject the old plan
+        // into the resumed conversation.
+        self.cards.plan_continue = None;
         // Plan/goal modes belong to the OLD conversation — a leaked plan card
         // indexes the replaced history and `/plan go` would run the old plan.
         self.plan_mode = false;

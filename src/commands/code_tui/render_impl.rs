@@ -1259,7 +1259,10 @@ impl CodeTuiApp {
         if self.cards.mcp_consent.is_some() {
             self.render_mcp_consent_card(frame, composer_area, outer);
         } else if self.account.pending_logout.is_some() {
+            // Above the plan card: a direct `/logout` outranks the advisory prompt.
             self.render_logout_confirm_card(frame, composer_area, outer);
+        } else if self.cards.plan_continue.is_some() {
+            self.render_plan_continue_card(frame, composer_area, outer);
         } else if self.cards.permission().is_some() {
             self.render_permission_card(frame, composer_area, outer);
         } else if self.cards.ask().is_some() {
@@ -1459,6 +1462,58 @@ impl CodeTuiApp {
         });
         frame.render_widget(block, card);
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    /// The `/new` continue-the-plan card: continue the outgoing session's
+    /// mid-execution checklist here, discard it, or Esc to keep it for `/plan resume`.
+    fn render_plan_continue_card(
+        &self,
+        frame: &mut Frame<'_>,
+        composer_area: Rect,
+        frame_area: Rect,
+    ) {
+        let Some(prompt) = self.cards.plan_continue.as_ref() else {
+            return;
+        };
+        let mut status = plan_steps_progress(&prompt.steps);
+        let next_step = plan_next_step(&prompt.steps);
+        if !next_step.is_empty() {
+            status.push_str(" · next: ");
+            status.push_str(&truncate_for_display_width(&next_step, 60));
+        }
+        // Mid-draft the letter keys flow into the message (only Esc decides) —
+        // mirror the permission card.
+        let keys = if self.draft.is_empty() {
+            account_keys_line(&[
+                ("y", ASSISTANT(), "continue"),
+                ("n", ERROR(), "discard"),
+                ("esc", WARNING(), "later (/plan resume)"),
+            ])
+        } else {
+            let mut keys = account_keys_line(&[("esc", WARNING(), "later")]);
+            keys.spans.push(Span::styled(
+                "    y/n type into your message — sending it keeps the plan for /plan resume",
+                Style::default().fg(MUTED()),
+            ));
+            keys
+        };
+        let lines = vec![
+            Line::from(Span::styled(
+                "Continue the previous session's unfinished plan?",
+                Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(status, Style::default().fg(MUTED()))),
+            Line::from(""),
+            keys,
+        ];
+        render_account_card(
+            frame,
+            composer_area,
+            frame_area,
+            "unfinished plan",
+            ACCENT(),
+            lines,
+        );
     }
 
     /// The `/logout` y/n confirm card (owns the keyboard, like MCP consent).

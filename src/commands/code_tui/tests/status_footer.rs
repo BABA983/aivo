@@ -1457,7 +1457,7 @@ fn jobs_badge_absent_when_idle() {
 async fn new_session_reroots_job_logs() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
-    app.start_new_chat();
+    app.start_new_chat().await;
     let new_id = app.session_id.clone();
     assert!(!new_id.is_empty(), "a new session id was minted");
     let out = app.jobs.spawn("echo hi", &std::env::temp_dir()).unwrap();

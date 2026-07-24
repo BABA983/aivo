@@ -376,3 +376,72 @@ pub(super) fn resume_metadata_spans(preview: &SessionPreview, width: u16) -> Vec
     }
     spans
 }
+
+// ── managed plan files (`/plan save`) ─────────────────────────────────────
+//
+// Bare `/plan save` writes under `<config>/plans/` with a `-<sid8>.md` session
+// suffix — the join key for update-in-place, picker dedupe, and lifecycle
+// deletion. Explicit-path saves are the user's own files, never touched here.
+
+/// `-<sid8>.md` — the managed filename suffix tying a plan file to its session.
+pub(super) fn plan_file_suffix(session_id: &str) -> String {
+    let hex: String = session_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    format!("-{}.md", &hex[hex.len().saturating_sub(8)..])
+}
+
+/// A plan's title: the first non-empty line, heading markers stripped. Drives
+/// both the managed filename slug and the picker's saved-file label.
+pub(super) fn plan_title(md: &str) -> &str {
+    md.lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim_start_matches(|c: char| c == '#' || c.is_whitespace())
+}
+
+/// The session's managed plan file: `<slug>-<sid8>.md`, slugged from the
+/// draft's first non-empty line ("plan" when there is no draft).
+pub(super) fn managed_plan_path(
+    config_dir: &Path,
+    draft: Option<&str>,
+    session_id: &str,
+) -> PathBuf {
+    let slug = plan_title(draft.unwrap_or(""))
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = if slug.is_empty() {
+        "plan"
+    } else {
+        slug.as_str()
+    };
+    crate::services::paths::plans_dir(config_dir)
+        .join(format!("{slug}{}", plan_file_suffix(session_id)))
+}
+
+/// Delete a session's managed plan file(s), except `keep` (the one just
+/// written — a slug change would otherwise leave the old name behind).
+pub(super) fn remove_managed_plan_files(config_dir: &Path, session_id: &str, keep: Option<&Path>) {
+    let suffix = plan_file_suffix(session_id);
+    let Ok(entries) = std::fs::read_dir(crate::services::paths::plans_dir(config_dir)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if keep.is_some_and(|k| k == path) {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(&suffix))
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}

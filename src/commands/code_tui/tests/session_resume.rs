@@ -676,7 +676,7 @@ async fn test_new_chat_clears_import_fidelity() {
     let mut app = make_test_app(tx, rx);
     app.import_fidelity = Some(crate::services::session_import::ImportFidelity::default());
 
-    app.start_new_chat();
+    app.start_new_chat().await;
 
     assert!(app.import_fidelity.is_none());
 }

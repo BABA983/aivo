@@ -60,6 +60,12 @@ pub fn gemini_thought_signatures(base: &Path) -> PathBuf {
     base.join(STATE_DIR).join("gemini_thought_signatures.json")
 }
 
+// ── plans/ (user content: `/plan save` markdown) ──────────────────────────
+
+pub fn plans_dir(base: &Path) -> PathBuf {
+    base.join("plans")
+}
+
 // ── secrets/ ──────────────────────────────────────────────────────────────
 
 pub fn device_key(base: &Path) -> PathBuf {

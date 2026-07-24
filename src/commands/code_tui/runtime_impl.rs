@@ -81,6 +81,18 @@ then call `exit_plan_mode` with the final plan.\n\n<carried-over-plan>\n{draft}\
     )
 }
 
+/// Bare `/plan resume` for THIS session's interrupted plan (Esc mid-execution):
+/// the transcript is already in context, so only a continue nudge goes out —
+/// with the checklist re-stated so completed marks survive context trimming.
+pub(super) fn plan_interrupted_message(steps: &str) -> String {
+    format!(
+        "Execution of the approved plan below was interrupted. Verify the steps marked \
+\"completed\" still hold, then continue from the first non-completed step. Call `update_plan` \
+with this checklist (keeping the completed marks) as you resume, and keep it updated as you \
+go.\n\n<interrupted-checklist>\n{steps}\n</interrupted-checklist>"
+    )
+}
+
 /// The `/plan resume` continuation for a mid-execution plan: the checklist rides
 /// along; already approved in its session, so execution continues — no re-approval.
 pub(super) fn plan_continue_message(steps: &str) -> String {
@@ -372,6 +384,9 @@ impl CodeTuiApp {
             ));
             return Ok(());
         }
+        // An outgoing turn implicitly defers the `/new` continue prompt — the
+        // plan stays for `/plan resume`. (The `y` path takes the card first.)
+        self.cards.plan_continue = None;
         let attachments = materialize_attachments(&self.draft_attachments).await?;
         if self.key.is_cursor_acp()
             && let Some(session) = self.cursor_acp_session.as_ref()
@@ -1527,11 +1542,11 @@ impl CodeTuiApp {
     pub(super) async fn execute_slash_command(&mut self, command: SlashCommand) -> Result<bool> {
         match command {
             SlashCommand::New => {
-                // A mid-execution plan auto-continues in the fresh session; an
-                // unapproved draft only hints (re-approval is a decision).
-                if let Some(steps) = self.start_new_chat() {
-                    self.resume_plan_from_session(PlanCarry::Continue(steps))
-                        .await;
+                // A mid-execution plan never auto-continues: a prompt asks
+                // first (continue / discard / Esc keeps it). A draft only hints.
+                let prior_session_id = self.session_id.clone();
+                if let Some(steps) = self.start_new_chat().await {
+                    self.offer_plan_continue(prior_session_id, steps);
                 }
                 Ok(false)
             }
@@ -2572,6 +2587,22 @@ pieces and keep going"
         };
         entries.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
         let mut items = Vec::new();
+        // Suffixes of sessions that made a row (plus this one) — their managed
+        // save files would be duplicates, so exclude them below.
+        let mut rowed_suffixes = vec![plan_file_suffix(&self.session_id)];
+        // THIS session first: an interrupted checklist continues right here;
+        // without a row `/plan resume` would deny a plan sitting in the transcript.
+        if let Some(steps) = self.unfinished_plan_steps() {
+            items.push(PickerEntry {
+                label: format!(
+                    "this session — {} · next: {}",
+                    plan_steps_progress(&steps),
+                    plan_next_step(&steps)
+                ),
+                search_text: format!("this session {steps}"),
+                value: PickerValue::PlanResume(PlanCarry::Interrupted(steps.to_string())),
+            });
+        }
         for entry in entries {
             if entry.session_id == self.session_id
                 || scope_cwd.as_deref().is_some_and(|dir| entry.cwd != dir)
@@ -2588,17 +2619,13 @@ pieces and keep going"
             // Mid-execution wins over a stale draft: continuing beats re-approving.
             if let Some(steps) = plan.steps {
                 let progress = plan_steps_progress(&steps);
-                let next = steps
-                    .as_array()
-                    .and_then(|items| items.iter().find(|item| plan_status(item) != "completed"))
-                    .and_then(|item| item.get("step").and_then(|s| s.as_str()))
-                    .unwrap_or("")
-                    .to_string();
+                let next = plan_next_step(&steps);
                 items.push(PickerEntry {
                     label: format!("{} — {progress} · next: {next}", entry.title),
                     search_text: format!("{} {} {steps}", entry.title, entry.session_id),
                     value: PickerValue::PlanResume(PlanCarry::Continue(steps.to_string())),
                 });
+                rowed_suffixes.push(plan_file_suffix(&entry.session_id));
                 continue;
             }
             // Mode-only planning (no draft yet) has nothing to carry over.
@@ -2616,18 +2643,22 @@ pieces and keep going"
                 search_text: format!("{} {} {}", entry.title, entry.session_id, draft),
                 value: PickerValue::PlanResume(PlanCarry::Draft(draft)),
             });
+            rowed_suffixes.push(plan_file_suffix(&entry.session_id));
         }
+        let session_rows = items.len();
+        items.extend(self.saved_plan_file_entries(&rowed_suffixes));
         if items.is_empty() {
             self.notice = Some((
                 MUTED(),
-                "No unfinished plans in this directory — a plan saves with its session until finished or discarded"
+                "No unfinished plans in this directory — a plan stays with its session (and /plan save) until finished or discarded"
                     .to_string(),
             ));
             return;
         }
-        // One candidate and no filter: skip the picker and carry it over (the
-        // common `/new` → `/plan resume` handoff).
-        if items.len() == 1 && query.is_empty() {
+        // One candidate and no filter: skip the picker and carry it over.
+        // Session rows only — a lone saved FILE may come from another project
+        // (the plans dir is global), so show the picker rather than surprise.
+        if items.len() == 1 && session_rows == 1 && query.is_empty() {
             let PickerValue::PlanResume(carry) = items.remove(0).value else {
                 unreachable!("plan picker rows are PlanResume");
             };
@@ -2640,6 +2671,49 @@ pieces and keep going"
             items,
             PickerKind::PlanResume,
         )));
+    }
+
+    /// Picker rows for managed `/plan save` files whose session made no row of
+    /// its own (deleted, other directory, hand-dropped). They carry as drafts,
+    /// newest first.
+    fn saved_plan_file_entries(&self, rowed_suffixes: &[String]) -> Vec<PickerEntry> {
+        let dir = crate::services::paths::plans_dir(self.session_store.config_dir());
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name();
+                let Some(name) = name.to_str() else {
+                    return false;
+                };
+                name.ends_with(".md") && !rowed_suffixes.iter().any(|s| name.ends_with(s.as_str()))
+            })
+            .map(|e| {
+                let modified = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (modified, e.path())
+            })
+            .collect();
+        files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        files
+            .into_iter()
+            .filter_map(|(_, path)| {
+                let contents = std::fs::read_to_string(&path).ok()?;
+                if contents.trim().is_empty() {
+                    return None;
+                }
+                let title = plan_title(&contents).to_string();
+                Some(PickerEntry {
+                    label: format!("{title} — saved plan"),
+                    search_text: format!("{title} {} {contents}", path.display()),
+                    value: PickerValue::PlanResume(PlanCarry::Draft(contents)),
+                })
+            })
+            .collect()
     }
 
     /// Carry a picked plan into this session. A draft enters plan mode, arms
@@ -2668,6 +2742,23 @@ pieces and keep going"
                 self.notice = Some((
                     MUTED(),
                     "Continuing the carried-over plan — completed steps get a quick re-check first"
+                        .to_string(),
+                ));
+            }
+            PlanCarry::Interrupted(steps) => {
+                let sent = self
+                    .dispatch_preserving_composer(
+                        plan_interrupted_message(&steps),
+                        Some("/plan resume".to_string()),
+                    )
+                    .await;
+                if let Err(e) = sent {
+                    self.notice = Some((ERROR(), e.to_string()));
+                    return;
+                }
+                self.notice = Some((
+                    MUTED(),
+                    "Continuing this session's plan — completed steps get a quick re-check first"
                         .to_string(),
                 ));
             }
@@ -2704,6 +2795,67 @@ pieces and keep going"
         }
     }
 
+    /// Arm the `/new` continue-the-plan prompt for the outgoing session's
+    /// mid-execution checklist.
+    pub(super) fn offer_plan_continue(
+        &mut self,
+        prior_session_id: String,
+        steps: serde_json::Value,
+    ) {
+        self.cards.plan_continue = Some(PlanContinuePrompt {
+            steps,
+            prior_session_id,
+        });
+    }
+
+    /// Resolve the continue-the-plan prompt: `y`/`Enter` carries the checklist
+    /// into this session, `n` discards it (clears the old session's planState
+    /// and managed save file), `Esc` keeps it for `/plan resume`. Returns `true`
+    /// when consumed as a decision; `y`/`n`/`Enter` only act on an empty composer
+    /// (mid-draft they belong to the message, like the permission card).
+    pub(super) async fn handle_plan_continue_key(&mut self, key: KeyEvent) -> bool {
+        // Esc is never message content: it always resolves to "later".
+        if matches!(key.code, KeyCode::Esc) {
+            if let Some(prompt) = self.cards.plan_continue.take() {
+                self.notice = Some((
+                    MUTED(),
+                    format!(
+                        "Plan kept aside ({}) — /plan resume picks it back up",
+                        plan_steps_progress(&prompt.steps)
+                    ),
+                ));
+            }
+            return true;
+        }
+        if !self.draft.is_empty() {
+            return false;
+        }
+        let cont = match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => true,
+            KeyCode::Char('n' | 'N') => false,
+            _ => return false,
+        };
+        let Some(prompt) = self.cards.plan_continue.take() else {
+            return false;
+        };
+        if cont {
+            self.resume_plan_from_session(PlanCarry::Continue(prompt.steps.to_string()))
+                .await;
+            return true;
+        }
+        let _ = self
+            .session_store
+            .set_plan_state(&prompt.prior_session_id, None)
+            .await;
+        remove_managed_plan_files(
+            self.session_store.config_dir(),
+            &prompt.prior_session_id,
+            None,
+        );
+        self.notice = Some((MUTED(), "Unfinished plan discarded".to_string()));
+        true
+    }
+
     /// Dispatch a machine-generated turn, stashing the composer so it can't swallow
     /// a draft or attachment. `shown` = the compact command shown instead of the
     /// machine text (`None` shows the text).
@@ -2725,8 +2877,10 @@ pieces and keep going"
 
     /// `/plan`: `[objective]` enters plan mode; bare also sends a kick-off turn
     /// so the agent interviews for the objective; `go [guidance]` approves a
-    /// drafted plan and executes it in the same session; `resume` carries an
-    /// unfinished plan over from a saved session; `stop` leaves.
+    /// drafted plan and executes it in the same session; `save [file]` writes
+    /// the plan to a markdown file; `resume` continues this session's
+    /// interrupted plan, else carries one over from a saved session (or a
+    /// `save`d file); `stop` leaves.
     pub(super) async fn run_plan_command(&mut self, arg: Option<String>) {
         let arg = arg.as_deref().map(str::trim).unwrap_or("");
         // First word = action; the rest is `go`'s optional guidance.
@@ -2778,10 +2932,51 @@ pieces and keep going"
                     },
                 ));
             }
+            // Allowed mid-turn: saving only reads state and writes a file.
+            "save" => self.save_plan_to_file(rest).await,
             "resume" | "list" => {
                 if self.sending {
                     self.queue_command(SlashCommand::Plan(Some(arg.to_string())), "/plan resume");
                     return;
+                }
+                // An interrupted checklist is a picker row, but a local DRAFT
+                // isn't — it's already armed, so point at the approval path.
+                if head == "resume"
+                    && rest.is_empty()
+                    && self.pending_plan.is_some()
+                    && self.unfinished_plan_steps().is_none()
+                {
+                    self.notice = Some((
+                        MUTED(),
+                        "A plan is already drafted here — approve it on the card or /plan go"
+                            .to_string(),
+                    ));
+                    return;
+                }
+                // An existing file resumes as a draft; anything else filters the picker.
+                if !rest.is_empty() {
+                    let path = self.resolve_user_path(rest);
+                    if path.is_file() {
+                        match std::fs::read_to_string(&path) {
+                            Ok(contents) if !contents.trim().is_empty() => {
+                                self.resume_plan_from_session(PlanCarry::Draft(contents))
+                                    .await;
+                            }
+                            Ok(_) => {
+                                self.notice = Some((
+                                    MUTED(),
+                                    format!("{} is empty — nothing to resume", path.display()),
+                                ));
+                            }
+                            Err(e) => {
+                                self.notice = Some((
+                                    ERROR(),
+                                    format!("Couldn't read {}: {e}", path.display()),
+                                ));
+                            }
+                        }
+                        return;
+                    }
                 }
                 self.open_plan_resume_picker(rest.to_string()).await;
             }
@@ -2873,11 +3068,98 @@ pieces and keep going"
         }
     }
 
+    /// `/plan save [path]`: write the plan (draft plus execution checklist as
+    /// markdown) to a file and checkpoint planState now instead of at turn end.
+    /// Bare saves go to the session's managed file under `<config>/plans/`
+    /// (updated in place, found by `/plan resume`); an explicit path is the
+    /// user's own file.
+    async fn save_plan_to_file(&mut self, path_arg: &str) {
+        let draft = self.pending_plan.clone();
+        let steps = self.unfinished_plan_steps();
+        if draft.is_none() && steps.is_none() {
+            self.notice = Some((
+                MUTED(),
+                "No plan to save — /plan <objective> drafts one".to_string(),
+            ));
+            return;
+        }
+        let mut md = String::new();
+        if let Some(draft) = &draft {
+            md.push_str(draft.trim_end());
+            md.push('\n');
+        } else {
+            md.push_str("# Plan\n");
+        }
+        if let Some(steps) = &steps {
+            md.push_str("\n## Progress\n\n");
+            for item in steps.as_array().into_iter().flatten() {
+                let mark = todo_checkbox(plan_status(item));
+                let label = item.get("step").and_then(|s| s.as_str()).unwrap_or("…");
+                md.push_str(&format!("- {mark} {label}\n"));
+            }
+        }
+        let managed = path_arg.is_empty();
+        let path = if managed {
+            managed_plan_path(
+                self.session_store.config_dir(),
+                draft.as_deref(),
+                &self.session_id,
+            )
+        } else {
+            self.resolve_user_path(path_arg)
+        };
+        let write = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, &md));
+        match write {
+            Ok(()) => {
+                if managed {
+                    // A changed draft title changes the slug — one file per session.
+                    remove_managed_plan_files(
+                        self.session_store.config_dir(),
+                        &self.session_id,
+                        Some(&path),
+                    );
+                }
+                self.persist_plan_state().await;
+                self.notice = Some((
+                    MUTED(),
+                    if managed {
+                        "Plan saved — /plan resume restores it, here or in another session"
+                            .to_string()
+                    } else {
+                        format!("Plan saved to {}", path.display())
+                    },
+                ));
+            }
+            Err(e) => {
+                self.notice = Some((ERROR(), format!("Couldn't write {}: {e}", path.display())));
+            }
+        }
+    }
+
+    /// A user-typed path: `~` expands, relatives resolve against the working dir.
+    fn resolve_user_path(&self, raw: &str) -> PathBuf {
+        let path = crate::services::system_env::expand_tilde(raw);
+        if path.is_relative() && !self.real_cwd.is_empty() {
+            return Path::new(&self.real_cwd).join(path);
+        }
+        path
+    }
+
     /// `/plan` for cursor: drives cursor's ACP `plan` mode via `session/set_mode`.
     /// No drafted-plan buffer — cursor owns its plan file and raises its own
     /// `cursor/create_plan` approval card.
     async fn run_cursor_plan_command(&mut self, head: &str, rest: &str, full: &str) {
         match head {
+            "save" => {
+                self.notice = Some((
+                    MUTED(),
+                    "Cursor keeps its own plan file — /plan save needs the native agent"
+                        .to_string(),
+                ));
+            }
             "stop" | "cancel" | "discard" | "off" => {
                 if self.sending {
                     self.queue_command(SlashCommand::Plan(Some("stop".to_string())), "/plan stop");
@@ -2993,25 +3275,27 @@ pieces and keep going"
         ));
     }
 
-    /// Returns the outgoing session's mid-execution checklist (JSON), if any, for
-    /// the `/new` handler to auto-continue. A draft only leaves the `/plan resume` hint.
-    pub(super) fn start_new_chat(&mut self) -> Option<String> {
-        // Scan for a leftover plan before the clears below (its planState is
-        // already on disk): an executing checklist hands off, a draft only hints,
-        // an empty history has no session file to point at.
-        let unfinished = (!self.history.is_empty())
+    /// Returns the outgoing session's mid-execution checklist, if any, for the
+    /// `/new` handler to offer continuing (that prompt owns the messaging — no
+    /// notice for it here). A draft only leaves the `/plan resume` hint.
+    pub(super) async fn start_new_chat(&mut self) -> Option<serde_json::Value> {
+        // Scan for a leftover plan before the clears below.
+        let handoff_steps = (!self.history.is_empty())
             .then(|| self.unfinished_plan_steps())
             .flatten();
-        let leftover_plan = match &unfinished {
-            Some(steps) => Some(plan_steps_progress(steps)),
-            None => (!self.history.is_empty() && self.pending_plan.is_some())
-                .then(|| "unapproved draft".to_string()),
-        };
-        let handoff_steps = unfinished.map(|steps| steps.to_string());
+        let draft_hint =
+            handoff_steps.is_none() && !self.history.is_empty() && self.pending_plan.is_some();
         self.discard_resume_state();
         // The share is pinned to the current session; a new chat swaps it out.
         self.stop_live_share();
         self.cancel_inflight_request(CancelKind::Discard);
+        // /new abandons this conversation — persist it first so `/resume` and
+        // `/plan resume` can find it (otherwise a mid-turn `/new` orphans the
+        // transcript and the executing checklist). Before the
+        // `pristine_import_len` reset so a merely-viewed import doesn't fork.
+        if !self.history.is_empty() {
+            let _ = self.persist_history().await;
+        }
         self.overlay = Overlay::None;
         self.pristine_import_len = None;
         self.import_fidelity = None;
@@ -3053,12 +3337,13 @@ pieces and keep going"
         self.plan_exit_pending = false;
         self.pending_plan = None;
         self.plan_card_idx = None;
-        self.notice = leftover_plan.map(|summary| {
+        // A leftover continue prompt belongs to the session it was armed in.
+        self.cards.plan_continue = None;
+        self.notice = draft_hint.then(|| {
             (
                 MUTED(),
-                format!(
-                    "The previous session left an unfinished plan ({summary}) — /plan resume continues it here"
-                ),
+                "The previous session left an unfinished plan (unapproved draft) — /plan resume continues it here"
+                    .to_string(),
             )
         });
         // Drop the cursor session (no context bleed across /new), then

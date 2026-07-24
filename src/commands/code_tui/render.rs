@@ -2493,6 +2493,17 @@ pub(super) fn plan_steps_progress(steps: &serde_json::Value) -> String {
     format!("{done}/{} steps done", items.len())
 }
 
+/// The first not-completed step's label from a checklist JSON array ("" when
+/// none/unnamed).
+pub(super) fn plan_next_step(steps: &serde_json::Value) -> String {
+    steps
+        .as_array()
+        .and_then(|items| items.iter().find(|item| plan_status(item) != "completed"))
+        .and_then(|item| item.get("step").and_then(|s| s.as_str()))
+        .unwrap_or("")
+        .to_string()
+}
+
 /// `[start, end)` window of steps to show when a plan exceeds `max`: the active
 /// step (`in_progress`, else first `pending`) at the top, backfilling upward only
 /// when it sits near the end.

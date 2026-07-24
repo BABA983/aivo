@@ -85,9 +85,20 @@ impl CodeTuiApp {
         }
 
         // The `/logout` confirm card likewise owns the keyboard until decided.
+        // Above plan-continue: a direct `/logout` outranks the advisory prompt.
         if self.account.pending_logout.is_some() {
             self.handle_logout_confirm_key(key);
             return Ok(false);
+        }
+
+        // The `/new` continue-the-plan prompt: decisions only on an empty
+        // composer; typing falls through to the editor. Skipped under an overlay
+        // so the picker's keys win.
+        if self.cards.plan_continue.is_some() && matches!(self.overlay, Overlay::None) {
+            if self.handle_plan_continue_key(key).await {
+                return Ok(false);
+            }
+            return self.handle_editor_key(key).await;
         }
 
         // A pending tool-permission card owns the decision keys (y/a/n), but only

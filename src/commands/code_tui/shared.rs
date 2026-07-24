@@ -532,7 +532,7 @@ pub(super) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "plan",
         help_label: "/plan [objective]",
-        description: "plan mode: investigate read-only, then approve the plan to execute it (go [-y] / stop / resume)",
+        description: "plan mode: investigate read-only, then approve the plan to execute it (go [-y] / save [file] / resume [file] / stop)",
         takes_argument: true,
     },
     SlashCommandSpec {
@@ -1454,6 +1454,17 @@ pub(super) struct McpConsentPrompt {
     pub(super) base_disabled: std::collections::HashSet<String>,
 }
 
+/// The `/new` continue-the-plan prompt: the fresh session asks before picking
+/// up the outgoing session's mid-execution checklist (continue / discard / Esc
+/// keeps it for `/plan resume`).
+#[derive(Clone, Debug)]
+pub(super) struct PlanContinuePrompt {
+    /// The checklist carried on continue.
+    pub(super) steps: serde_json::Value,
+    /// The outgoing session, whose planState is cleared on discard.
+    pub(super) prior_session_id: String,
+}
+
 /// Content digest of a repo's project `.mcp.json` stdio servers — the exact
 /// `(name, "command args…")` set the user is shown on the consent card, already
 /// sorted by name. An "always" approval is bound to this digest, so a later
@@ -1560,11 +1571,13 @@ impl PickerEntry {
 }
 
 /// What `/plan resume` carries: a draft awaiting approval (re-enters plan mode),
-/// or an approved plan mid-execution (its checklist JSON — continues directly).
+/// another session's mid-execution checklist (continues directly), or THIS
+/// session's interrupted checklist (same-session framing).
 #[derive(Clone)]
 pub(super) enum PlanCarry {
     Draft(String),
     Continue(String),
+    Interrupted(String),
 }
 
 #[derive(Clone)]
@@ -3026,6 +3039,9 @@ pub(super) struct AgentCards {
     /// Independent lifecycle: shown above any agent card and NOT dropped by
     /// [`Self::clear_agent_cards`] at turn teardown.
     pub(super) mcp_consent: Option<McpConsentPrompt>,
+    /// Pending `/new` continue-the-plan prompt. Like `mcp_consent`, its
+    /// lifecycle is independent of the agent-card slot.
+    pub(super) plan_continue: Option<PlanContinuePrompt>,
 }
 
 /// Typed views of `active` so call sites keep their per-card shape:
