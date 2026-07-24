@@ -76,10 +76,10 @@ fn test_composer_visual_rows_wraps_at_word_boundary() {
 fn test_composer_cursor_visual_up_down_on_wrapped_line() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
-    // width 10 → 8 text cols. "abcdefghij" → row0 (0..8), row1 (8..10).
+    // Inner width 10 → 9 text cols. "abcdefghij" → row0 (0..9), row1 (9..10).
     app.composer_text_area = Some(Rect::new(0, 0, 10, 5));
     app.draft = "abcdefghij".to_string();
-    app.cursor = 9; // row 1, one char in (display col 3)
+    app.cursor = 10; // end of row 1 (display col 2)
 
     // Up moves to the same display column on row 0 (after 'a').
     assert!(app.composer_cursor_up());
@@ -88,7 +88,7 @@ fn test_composer_cursor_visual_up_down_on_wrapped_line() {
     assert!(!app.composer_cursor_up());
     // Down returns to row 1 at the same column.
     assert!(app.composer_cursor_down());
-    assert_eq!(app.cursor, 9);
+    assert_eq!(app.cursor, 10);
     // Bottom row → false.
     assert!(!app.composer_cursor_down());
 }
@@ -101,9 +101,9 @@ fn test_composer_wrapped_row_renders_hanging_indent() {
     app.draft = "abcdefghij".to_string();
 
     let text = app.render_composer_text();
-    assert_eq!(plain_text_from_spans(&text.lines[0].spans), "> abcdefgh");
-    // Wrapped continuation aligns under the text with a 2-col indent.
-    assert_eq!(plain_text_from_spans(&text.lines[1].spans), "  ij");
+    assert_eq!(plain_text_from_spans(&text.lines[0].spans), " abcdefghi");
+    // The prompt glyph lives in the border; continuation keeps the inner spacer.
+    assert_eq!(plain_text_from_spans(&text.lines[1].spans), " j");
 }
 
 #[test]
@@ -144,10 +144,10 @@ fn test_composer_mouse_click_maps_to_cursor_offset() {
         row,
         modifiers: KeyModifiers::NONE,
     };
-    // Column 4 on row 0 is the 'c' cell ('>'=0, ' '=1, 'a'=2, 'b'=3, 'c'=4) → caret before 'c'.
-    assert_eq!(app.composer_offset_for_mouse(click(4, 0)), Some(2));
-    // Row 1 holds "  ij"; clicking the 'j' cell (col 3) lands the caret before 'j'.
-    assert_eq!(app.composer_offset_for_mouse(click(3, 1)), Some(9));
+    // Column 3 on row 0 is the 'c' cell (' '=0, 'a'=1, 'b'=2, 'c'=3) → caret before 'c'.
+    assert_eq!(app.composer_offset_for_mouse(click(3, 0)), Some(2));
+    // Row 1 holds " j"; clicking the 'j' cell (col 1) lands before it.
+    assert_eq!(app.composer_offset_for_mouse(click(1, 1)), Some(9));
     // A click outside the composer misses.
     assert_eq!(app.composer_offset_for_mouse(click(40, 40)), None);
 }
@@ -472,21 +472,21 @@ fn test_composer_empty_lines_align_with_cursor_position() {
     // ratatui WordWrapper producing extra visual rows for whitespace-only Lines.
     let lines = vec![
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(USER())),
+            Span::styled(" ", Style::default().fg(USER())),
             Span::styled("hello", Style::default().fg(TEXT())),
         ]),
         Line::from(vec![
-            Span::raw("  "),
+            Span::raw(" "),
             Span::styled("hel", Style::default().fg(TEXT())),
         ]),
         Line::from(vec![
-            Span::raw("  "),
+            Span::raw(" "),
             Span::styled("sadf", Style::default().fg(TEXT())),
         ]),
         Line::from(""),
         Line::from(""),
         Line::from(vec![
-            Span::raw("  "),
+            Span::raw(" "),
             Span::styled("dsf", Style::default().fg(TEXT())),
         ]),
     ];
@@ -508,17 +508,17 @@ fn test_composer_empty_lines_align_with_cursor_position() {
             .collect()
     };
 
-    assert!(cell_row(0).starts_with("> hello"), "row 0");
-    assert!(cell_row(1).starts_with("  hel"), "row 1");
-    assert!(cell_row(2).starts_with("  sadf"), "row 2");
+    assert!(cell_row(0).starts_with(" hello"), "row 0");
+    assert!(cell_row(1).starts_with(" hel"), "row 1");
+    assert!(cell_row(2).starts_with(" sadf"), "row 2");
     assert!(
-        cell_row(5).starts_with("  dsf"),
+        cell_row(5).starts_with(" dsf"),
         "row 5: dsf must align with cursor_position y=5"
     );
 
     // cursor_position must agree
-    let (cx, cy) = cursor_position("hello\nhel\nsadf\n\n\ndsf", 17, 20, 2);
-    assert_eq!((cx, cy), (2, 5));
+    let (cx, cy) = cursor_position("hello\nhel\nsadf\n\n\ndsf", 17, 20, 1);
+    assert_eq!((cx, cy), (1, 5));
 }
 
 /// The composer rule shows a live `/goal` step indicator (and the auto-approve
@@ -669,5 +669,5 @@ fn test_empty_composer_placeholder_reserves_cursor_cell() {
     let app = make_test_app(tx, rx);
     let line = app.render_composer_text().lines[0].clone();
     let plain = plain_text_from_spans(&line.spans);
-    assert_eq!(plain, ">  Ask, plan, or build · / for commands");
+    assert_eq!(plain, "  Ask, plan, or build · / for commands");
 }

@@ -641,7 +641,7 @@ pub(super) fn render_user_message(
     attachments: &[MessageAttachment],
     width: u16,
 ) {
-    // `> ` in the composer-prompt style, so an echoed turn lines up under the caret.
+    // Match the composer prompt so echoed turns line up under the caret.
     let mut block: Vec<StyledLine> = content
         .lines()
         .map(|raw| line_plain(raw.to_string(), Style::default().fg(TEXT())))
@@ -652,7 +652,7 @@ pub(super) fn render_user_message(
     lines.extend(mark_block(
         block,
         width.saturating_sub(TURN_MARKER_W),
-        "> ",
+        "❯ ",
         Style::default().fg(USER()).add_modifier(Modifier::BOLD),
     ));
     render_user_attachment_lines(lines, attachments);

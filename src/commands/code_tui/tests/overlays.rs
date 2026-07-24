@@ -695,14 +695,18 @@ fn test_agents_overlay_empty_state_fits_narrow_terminals() {
     let mut app = make_test_app(tx, rx);
     app.overlay = Overlay::Agents(AgentsOverlay::default());
     let (top, _) = render_full_screen(&mut app, 46, 18);
-    // Keep only the modal interior (between the │ borders), then collapse
-    // whitespace: wrapping may split lines, but every WORD must survive whole.
+    // Locate the modal from its rounded title row, then keep only those columns.
+    // Other UI (including the composer) can have its own vertical borders.
+    let title_row = top.lines().find(|row| row.contains("Agents")).unwrap();
+    let left = title_row.chars().position(|c| c == '╭').unwrap();
+    let right = title_row.chars().position(|c| c == '╮').unwrap();
     let interior: String = top
         .lines()
-        .filter_map(|row| {
-            let first = row.find('\u{2502}')?;
-            let last = row.rfind('\u{2502}')?;
-            (last > first).then(|| row[first + '\u{2502}'.len_utf8()..last].to_string())
+        .map(|row| {
+            row.chars()
+                .skip(left + 1)
+                .take(right.saturating_sub(left + 1))
+                .collect::<String>()
         })
         .collect::<Vec<_>>()
         .join(" ");

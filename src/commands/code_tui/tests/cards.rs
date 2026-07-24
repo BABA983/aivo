@@ -45,7 +45,7 @@ fn test_permission_card_anchored_above_composer() {
     );
 
     // The card hugs the composer: its bottom border sits just above the input's
-    // full-width divider rule, which sits directly above the prompt (not floating
+    // rounded top border, which sits directly above the prompt (not floating
     // mid-screen like a centered modal).
     let bottom_border_row = rows
         .iter()
@@ -53,21 +53,21 @@ fn test_permission_card_anchored_above_composer() {
         .expect("card bottom border");
     let composer_row = rows
         .iter()
-        .position(|r| r.trim_start().starts_with('>'))
+        .position(|r| r.trim_start().starts_with("❯ "))
         .expect("composer prompt row");
     assert_eq!(
         bottom_border_row + 2,
         composer_row,
-        "card bottom must sit one row (the divider) above the composer:\n{screen}"
+        "card bottom must sit one row (the top border) above the composer:\n{screen}"
     );
-    // The divider directly under the card is the full-width composer rule — now
+    // The border directly under the card is the full-width composer top — now
     // always carrying the mode badge (here "normal", since a card only shows
     // when auto-approve is off) — so the narrower card never leaves it poking
     // out past the card's right edge.
     let divider = &rows[bottom_border_row + 1];
     assert!(
         divider.contains('─') && divider.contains("normal"),
-        "full-width composer rule (with the mode badge) must sit under the card:\n{screen}"
+        "full-width composer border (with the mode badge) must sit under the card:\n{screen}"
     );
 
     // The card is sized to its content, not stretched across the full 60-col

@@ -743,7 +743,7 @@ pub(super) fn composer_visual_rows(draft: &str, text_width: usize) -> Vec<(usize
 }
 
 /// The cursor's `(visual row, display column)` within `rows`. The column counts
-/// the 2-col prompt indent every row carries. At a soft-wrap boundary the cursor
+/// the prompt indent every row carries. At a soft-wrap boundary the cursor
 /// belongs to the *start* of the next row (the last row whose start ≤ cursor).
 pub(super) fn composer_cursor_rowcol(
     draft: &str,
@@ -805,6 +805,9 @@ pub(super) fn cursor_position(
     let text_width = usize::from(width).saturating_sub(prefix).max(1);
     let rows = composer_visual_rows(text, text_width);
     let (row, col) = composer_cursor_rowcol(text, cursor, &rows);
+    let col = col
+        .saturating_sub(usize::from(COMPOSER_PREFIX_WIDTH))
+        .saturating_add(prefix);
     let x = col.min(usize::from(width).saturating_sub(1).max(prefix));
     (x as u16, row as u16)
 }

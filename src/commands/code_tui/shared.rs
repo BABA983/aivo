@@ -347,7 +347,8 @@ pub(super) const WELCOME_TIPS: &[&str] = &[
     "type while the agent works to queue your next message",
     "/new starts a fresh session, keeping your keys",
 ];
-pub(super) const COMPOSER_PREFIX_WIDTH: u16 = 2;
+// Keeps typed text aligned with transcript turns while the glyph occupies the border.
+pub(super) const COMPOSER_PREFIX_WIDTH: u16 = 1;
 pub(super) const DEFAULT_CHAT_SCROLL_SPEED: usize = 3;
 pub(super) const MAX_CHAT_SCROLL_SPEED: usize = 50;
 pub(super) const TOAST_DURATION: Duration = Duration::from_secs(3);
@@ -390,8 +391,8 @@ pub(super) const TYPEWRITER_CATCHUP_DIVISOR: usize = 2;
 /// repaint; leftover events are drained on the next tick.
 pub(super) const MAX_INPUT_EVENTS_PER_TICK: usize = 512;
 
-// No message indent (formerly the accent-bar gutter): turns sit flush at column 0,
-// so a user turn's `> ` marker lines up with the composer `> ` prompt below.
+// No message indent (formerly the accent-bar gutter), keeping user turns aligned
+// with the composer prompt below.
 pub(super) const ACCENT_GUTTER_WIDTH: u16 = 0;
 
 // The welcome header (banner + tip) is inset this many columns past the messages.

@@ -2259,34 +2259,35 @@ impl CodeTuiApp {
             self.render_queued_panel(frame, queue_panel_area, &queue_lines);
         }
 
-        // Blank spacing row, top rule, input, then a bottom rule closing the
-        // composer into a box (open at the sides so `> ` keeps its column).
+        // Leave one breathing row, then enclose the input in a rounded box.
         let composer_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ])
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
             .split(composer_outer);
 
         clear_to_canvas(frame, composer_chunks[0]);
+        let composer_box_area = composer_chunks[1];
+        clear_to_canvas(frame, composer_box_area);
+        let composer_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(self.composer_rule_style());
+        let composer_area = composer_block.inner(composer_box_area);
+        frame.render_widget(composer_block, composer_box_area);
+
+        // Paint the live mode/history badges into the top border while leaving
+        // the rounded corner cells intact.
+        let title_area = Rect {
+            x: composer_box_area.x.saturating_add(1),
+            y: composer_box_area.y,
+            width: composer_box_area.width.saturating_sub(2),
+            height: 1,
+        };
         frame.render_widget(
-            Paragraph::new(self.composer_rule_line(composer_chunks[1].width.max(1))),
-            composer_chunks[1],
-        );
-        // Plain chrome (badges live on the top rule), but shares the tint so a
-        // tinted box reads as one shape.
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(usize::from(composer_chunks[3].width)),
-                self.composer_rule_style(),
-            ))),
-            composer_chunks[3],
+            Paragraph::new(self.composer_rule_line(title_area.width.max(1))),
+            title_area,
         );
 
-        let composer_area = composer_chunks[2];
         // Record the area + scroll the draft so the cursor row stays on-screen,
         // then render the (pre-wrapped) visible rows. We wrap ourselves into
         // hanging-indent rows and render with wrap OFF, so rendering, cursor
@@ -2295,6 +2296,26 @@ impl CodeTuiApp {
         self.update_composer_scroll(composer_area);
         let composer = Paragraph::new(self.render_composer_text());
         frame.render_widget(composer, composer_area);
+
+        // The prompt occupies the left border cell, keeping its marker and text
+        // aligned with transcript turns instead of shifting both into the box.
+        let prompt_y = composer_area
+            .y
+            .saturating_add(self.draft_attachments.len() as u16);
+        if prompt_y < composer_area.y.saturating_add(composer_area.height) {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    self.composer_prompt_glyph(),
+                    self.composer_prompt_style(),
+                )),
+                Rect {
+                    x: composer_box_area.x,
+                    y: prompt_y,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
 
         if self.should_show_input_cursor()
             && let Some((cursor_x, cursor_y)) = self.composer_cursor_screen(composer_area)
@@ -2306,7 +2327,7 @@ impl CodeTuiApp {
         composer_area
     }
 
-    /// Hue shared by the composer's top and bottom rules: shell mode tints
+    /// Hue shared by the composer's rounded border: shell mode tints
     /// magenta (shell wins, matching the tinted draft), plan mode tints ACCENT,
     /// else quiet FAINT.
     pub(super) fn composer_rule_style(&self) -> Style {
@@ -2874,23 +2895,7 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_composer_text(&self) -> Text<'static> {
-        let prompt = if self.draft_history_index.is_some() {
-            Span::styled(
-                "^ ",
-                Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD),
-            )
-        } else if self.draft_is_shell_command() {
-            // `!cmd` shell mode tints the prompt itself in the magenta shell hue too.
-            Span::styled(
-                "> ",
-                Style::default().fg(SHELL()).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled(
-                "> ",
-                Style::default().fg(USER()).add_modifier(Modifier::BOLD),
-            )
-        };
+        let prompt = Span::styled(" ", self.composer_prompt_style());
         let mut lines = composer_attachment_lines(&self.draft_attachments);
         if self.draft.is_empty() {
             let placeholder = if self.loading_resume.is_some() {
@@ -2920,16 +2925,15 @@ impl CodeTuiApp {
         } else {
             TEXT()
         };
-        // Pre-wrapped visual rows: row 0 gets the `> ` prompt; every other row
-        // gets a matching 2-col hanging indent so wrapped text aligns under the
-        // first character. Rendered with wrap OFF (see `render_main`).
+        // Every row gets the one-cell inset after the prompt glyph embedded in
+        // the border, so wrapped text aligns under the first character.
         let rows = composer_visual_rows(&self.draft, self.composer_text_width());
         let last = rows.len().saturating_sub(1);
         for (index, &(start, end)) in rows.iter().enumerate().skip(self.composer_scroll) {
             let prefix = if index == 0 {
                 prompt.clone()
             } else {
-                Span::raw("  ")
+                Span::raw(" ")
             };
             let mut spans = vec![
                 prefix,
@@ -2950,6 +2954,25 @@ impl CodeTuiApp {
         }
 
         Text::from(lines)
+    }
+
+    fn composer_prompt_glyph(&self) -> &'static str {
+        if self.draft_history_index.is_some() {
+            "^"
+        } else {
+            "❯"
+        }
+    }
+
+    fn composer_prompt_style(&self) -> Style {
+        let color = if self.draft_history_index.is_some() {
+            ACCENT()
+        } else if self.draft_is_shell_command() {
+            SHELL()
+        } else {
+            USER()
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
     /// Scroll the draft within the composer so the cursor's visual row stays
@@ -3279,13 +3302,14 @@ impl CodeTuiApp {
             1
         } else {
             let text_width = usize::from(width)
+                .saturating_sub(2)
                 .saturating_sub(usize::from(COMPOSER_PREFIX_WIDTH))
                 .max(1);
             composer_visual_rows(&self.draft, text_width).len()
         };
         let lines = (draft_rows + self.draft_attachments.len()) as u16;
-        // +3 reserves the leading blank spacing row and the top and bottom
-        // rules; the rest is draft text (capped, then it scrolls within the box).
+        // +3 reserves the leading blank spacing row and the box's two border
+        // rows; the rest is draft text (capped, then it scrolls within the box).
         (lines + 3).clamp(4, 10)
     }
 

@@ -833,17 +833,17 @@ fn test_render_main_omits_accent_gutter_bars() {
         }
     }
 
-    // User turns marked `> ` (like the prompt), the agent `⏺ `; both in the same column.
+    // User turns marked `❯ ` (like the prompt), the agent `⏺ `; both in the same column.
     let user_y = (0..16u16)
         .find(|&y| row_text(y).contains("ping"))
         .expect("user message row");
     let user_row = row_text(user_y);
     assert!(
-        user_row.contains("> ping"),
-        "user turn should carry a `> ` marker, got {user_row:?}"
+        user_row.contains("❯ ping"),
+        "user turn should carry a `❯ ` marker, got {user_row:?}"
     );
     assert_eq!(
-        user_row.find('>'),
+        user_row.find('❯'),
         Some(usize::from(APP_LEFT_MARGIN + ACCENT_GUTTER_WIDTH)),
         "user marker should sit at the message column, got {user_row:?}"
     );
@@ -856,9 +856,9 @@ fn test_render_main_omits_accent_gutter_bars() {
         "assistant turn should carry a `⏺ ` bullet, got {assistant_row:?}"
     );
     assert_eq!(
-        user_row.find('>'),
+        user_row.find('❯'),
         assistant_row.find('⏺'),
-        "user `>` and agent `⏺` markers must share a column"
+        "user `❯` and agent `⏺` markers must share a column"
     );
 }
 
@@ -897,8 +897,11 @@ fn test_render_main_uses_full_height_for_long_transcript() {
     let rule_row: String = (0..buf.area.width)
         .map(|x| buf.cell((x, 10)).unwrap().symbol().to_string())
         .collect();
+    let mut rule_chars = rule_row.trim().chars();
     assert!(
-        !rule_row.trim().is_empty() && rule_row.trim().chars().all(|c| c == '─'),
+        rule_chars.next() == Some('╰')
+            && rule_chars.next_back() == Some('╯')
+            && rule_chars.all(|c| c == '─'),
         "closing rule row: {rule_row:?}"
     );
     // The overflow transcript starts under the app-wide top margin.

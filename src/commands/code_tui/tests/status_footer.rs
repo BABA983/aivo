@@ -250,6 +250,35 @@ fn test_composer_rule_drops_cycle_hint_when_narrow() {
 }
 
 #[test]
+fn test_composer_renders_as_full_rounded_box() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.draft = "preview".to_string();
+    app.cursor = app.draft.len();
+
+    let (_, rows) = render_full_screen(&mut app, 60, 16);
+
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with('╭') && row.ends_with('╮')),
+        "rounded composer top missing:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with("❯ preview") && row.ends_with('│')),
+        "composer prompt is not integrated into its border:\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.starts_with('╰') && row.ends_with('╯')),
+        "rounded composer bottom missing:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
 fn test_footer_groups_workspace_left_engine_right() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

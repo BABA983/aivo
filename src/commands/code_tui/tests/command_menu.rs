@@ -269,6 +269,31 @@ fn test_render_command_menu_rows_aligns_description_column() {
 }
 
 #[test]
+fn test_command_menu_uses_rounded_border() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = make_test_app(tx, rx);
+    let menu = VisibleCommandMenu {
+        kind: MenuKind::Commands,
+        entries: Vec::new(),
+        selected: None,
+    };
+    let area = Rect::new(2, 2, 30, 6);
+    let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+    terminal
+        .draw(|frame| app.render_command_menu(frame, area, &menu))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+
+    assert_eq!(buffer[(area.x, area.y)].symbol(), "╭");
+    assert_eq!(buffer[(area.right() - 1, area.y)].symbol(), "╮");
+    assert_eq!(buffer[(area.x, area.bottom() - 1)].symbol(), "╰");
+    assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "╯");
+}
+
+#[test]
 fn test_collect_attach_path_suggestions_lists_matching_entries() {
     let temp_dir = TempDir::new().unwrap();
     std::fs::write(temp_dir.path().join("alpha.txt"), "hi").unwrap();

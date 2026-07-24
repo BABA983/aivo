@@ -10,6 +10,7 @@ impl CodeTuiApp {
         clear_to_canvas(frame, area);
         let shell = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(FAINT()));
         frame.render_widget(shell, area);
 
