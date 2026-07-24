@@ -2297,26 +2297,6 @@ impl CodeTuiApp {
         let composer = Paragraph::new(self.render_composer_text());
         frame.render_widget(composer, composer_area);
 
-        // The prompt occupies the left border cell, keeping its marker and text
-        // aligned with transcript turns instead of shifting both into the box.
-        let prompt_y = composer_area
-            .y
-            .saturating_add(self.draft_attachments.len() as u16);
-        if prompt_y < composer_area.y.saturating_add(composer_area.height) {
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    self.composer_prompt_glyph(),
-                    self.composer_prompt_style(),
-                )),
-                Rect {
-                    x: composer_box_area.x,
-                    y: prompt_y,
-                    width: 1,
-                    height: 1,
-                },
-            );
-        }
-
         if self.should_show_input_cursor()
             && let Some((cursor_x, cursor_y)) = self.composer_cursor_screen(composer_area)
         {
@@ -2895,7 +2875,6 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_composer_text(&self) -> Text<'static> {
-        let prompt = Span::styled(" ", self.composer_prompt_style());
         let mut lines = composer_attachment_lines(&self.draft_attachments);
         if self.draft.is_empty() {
             let placeholder = if self.loading_resume.is_some() {
@@ -2911,7 +2890,7 @@ impl CodeTuiApp {
                     Style::default().fg(FAINT()),
                 )
             };
-            lines.push(Line::from(vec![prompt, placeholder]));
+            lines.push(Line::from(vec![Span::raw(" "), placeholder]));
             return Text::from(lines);
         }
 
@@ -2919,24 +2898,19 @@ impl CodeTuiApp {
         // `> /mcp [add … | rm <name>]`. Only set when the draft is a single line.
         let ghost = self.composer_command_hint();
         // A `!cmd` draft is tinted in the magenta shell hue, so shell mode reads at
-        // a glance — the prompt and its top divider pick up the same magenta color.
+        // a glance — its border picks up the same magenta color.
         let draft_color = if self.draft_is_shell_command() {
             SHELL()
         } else {
             TEXT()
         };
-        // Every row gets the one-cell inset after the prompt glyph embedded in
-        // the border, so wrapped text aligns under the first character.
+        // Every row gets a one-cell inset off the border, so wrapped text
+        // aligns under the first character.
         let rows = composer_visual_rows(&self.draft, self.composer_text_width());
         let last = rows.len().saturating_sub(1);
         for (index, &(start, end)) in rows.iter().enumerate().skip(self.composer_scroll) {
-            let prefix = if index == 0 {
-                prompt.clone()
-            } else {
-                Span::raw(" ")
-            };
             let mut spans = vec![
-                prefix,
+                Span::raw(" "),
                 Span::styled(
                     self.draft[start..end].to_string(),
                     Style::default().fg(draft_color),
@@ -2954,25 +2928,6 @@ impl CodeTuiApp {
         }
 
         Text::from(lines)
-    }
-
-    fn composer_prompt_glyph(&self) -> &'static str {
-        if self.draft_history_index.is_some() {
-            "^"
-        } else {
-            "❯"
-        }
-    }
-
-    fn composer_prompt_style(&self) -> Style {
-        let color = if self.draft_history_index.is_some() {
-            ACCENT()
-        } else if self.draft_is_shell_command() {
-            SHELL()
-        } else {
-            USER()
-        };
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
     /// Scroll the draft within the composer so the cursor's visual row stays

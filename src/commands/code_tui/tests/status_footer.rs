@@ -266,8 +266,8 @@ fn test_composer_renders_as_full_rounded_box() {
     );
     assert!(
         rows.iter()
-            .any(|row| row.starts_with("❯ preview") && row.ends_with('│')),
-        "composer prompt is not integrated into its border:\n{}",
+            .any(|row| row.starts_with("│ preview") && row.ends_with('│')),
+        "composer draft should sit inside the box with no prompt glyph:\n{}",
         rows.join("\n")
     );
     assert!(

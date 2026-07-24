@@ -45,7 +45,7 @@ fn test_permission_card_anchored_above_composer() {
     );
 
     // The card hugs the composer: its bottom border sits just above the input's
-    // rounded top border, which sits directly above the prompt (not floating
+    // rounded top border, which sits directly above the input row (not floating
     // mid-screen like a centered modal).
     let bottom_border_row = rows
         .iter()
@@ -53,8 +53,8 @@ fn test_permission_card_anchored_above_composer() {
         .expect("card bottom border");
     let composer_row = rows
         .iter()
-        .position(|r| r.trim_start().starts_with("❯ "))
-        .expect("composer prompt row");
+        .position(|r| r.contains("Ask, plan, or build"))
+        .expect("composer input row");
     assert_eq!(
         bottom_border_row + 2,
         composer_row,
