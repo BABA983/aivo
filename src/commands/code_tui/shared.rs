@@ -401,12 +401,11 @@ pub(super) const HEADER_LEFT_INSET: u16 = 2;
 // composer, footer) stays full-bleed.
 pub(super) const TRANSCRIPT_RIGHT_MARGIN: u16 = 2;
 
-// One-column left margin for the whole main UI (transcript, composer, footer shift
-// together, keeping `> ` aligned) so markers don't hug the terminal edge.
-pub(super) const APP_LEFT_MARGIN: u16 = 1;
+// Keep the main UI flush with the terminal's own inset.
+pub(super) const APP_LEFT_MARGIN: u16 = 0;
 
-// One blank row between the terminal top and the first content row.
-pub(super) const APP_TOP_MARGIN: u16 = 1;
+// Keep the main UI flush with the terminal's own top inset.
+pub(super) const APP_TOP_MARGIN: u16 = 0;
 
 // Every non-main block (thinking, tool calls/results, shell, meta) nests this many
 // columns under the `> `/`⏺ ` turns — aligned with their body text.

@@ -93,15 +93,18 @@ fn test_render_main_keeps_composer_near_short_empty_transcript() {
         })
         .unwrap();
 
-    // Near the short content, one row lower under the app-wide top margin.
+    // Near the short content, offset by the app-wide top margin.
     assert!(composer_area.y + composer_area.height < 11 + APP_TOP_MARGIN);
     assert_eq!(
         app.transcript_hitbox.as_ref().unwrap().area.y,
         APP_TOP_MARGIN
     );
-    // 80 minus the 1-col left margin and 2-col right margin.
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 77);
-    assert_eq!(app.transcript_width, 77);
+    let expected_width = 80 - APP_LEFT_MARGIN - TRANSCRIPT_RIGHT_MARGIN;
+    assert_eq!(
+        app.transcript_hitbox.as_ref().unwrap().area.width,
+        expected_width
+    );
+    assert_eq!(app.transcript_width, expected_width);
 }
 
 #[test]
@@ -903,7 +906,10 @@ fn test_render_main_uses_full_height_for_long_transcript() {
         app.transcript_hitbox.as_ref().unwrap().area.y,
         APP_TOP_MARGIN
     );
-    // 80 minus the 1-col left margin and 2-col right margin.
-    assert_eq!(app.transcript_hitbox.as_ref().unwrap().area.width, 77);
-    assert_eq!(app.transcript_width, 77);
+    let expected_width = 80 - APP_LEFT_MARGIN - TRANSCRIPT_RIGHT_MARGIN;
+    assert_eq!(
+        app.transcript_hitbox.as_ref().unwrap().area.width,
+        expected_width
+    );
+    assert_eq!(app.transcript_width, expected_width);
 }
