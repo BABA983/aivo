@@ -340,6 +340,10 @@ async fn serve_cursor(params: CursorServeParams) -> Result<ExitCode> {
         failover_count,
     } = params;
 
+    // Remote clients drive cursor-agent's shells; don't restore the
+    // operator's real env in them.
+    crate::services::cursor_home_shadow::isolate_shells_for_process();
+
     if cursor_acp::is_legacy_cursor_login_secret(key.key.as_str()) {
         eprintln!(
             "{} This cursor key predates per-account isolation. Remove it (`aivo keys rm {}`) and re-add (`aivo keys add cursor`).",
