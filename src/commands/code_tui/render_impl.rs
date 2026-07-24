@@ -612,7 +612,7 @@ impl CodeTuiApp {
             Some((label, _)) => label.clone(),
             None => self.desired_status(),
         };
-        // Tokens (measured, else ~chars/4; 0 omitted) · queued count · esc hint.
+        // Tokens (measured, else ~chars/4; 0 omitted) · queued count.
         let tail = if self.sending {
             let mut parts: Vec<String> = Vec::new();
             let (used, is_estimate) = if self.turn_output_tokens > 0 {
@@ -631,10 +631,9 @@ impl CodeTuiApp {
             if queued > 0 {
                 parts.push(format!("{queued} queued"));
             }
-            parts.push("esc to interrupt".to_string());
             parts.join(" · ")
         } else {
-            "esc to interrupt".to_string()
+            String::new()
         };
         // A named tool step is timed by its own runtime, not the whole turn's —
         // else a fast read reads "20m" when a sibling subagent dominates the turn.
@@ -703,10 +702,8 @@ impl CodeTuiApp {
                 .iter()
                 .filter(|r| r.done.is_some())
                 .count();
-            return format!(
-                "running {} sub-agents ({done} done)",
-                self.subagent_rows.len()
-            );
+            let total = self.subagent_rows.len();
+            return format!("running {total} sub-agents ({done}/{total} done)");
         }
         // A bridged parallel batch: count the trailing run rather than naming
         // only the newest call.
@@ -721,7 +718,7 @@ impl CodeTuiApp {
             } else {
                 "parallel steps"
             };
-            return format!("running {total} {noun} ({done} done)");
+            return format!("running {total} {noun} ({done}/{total} done)");
         }
         if let Some(action) = self.current_action_label() {
             return action;

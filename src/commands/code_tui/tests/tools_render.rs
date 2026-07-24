@@ -47,14 +47,14 @@ fn test_parallel_bridged_batch_counts_and_lists_calls() {
             None,
         );
     }
-    assert_eq!(app.desired_status(), "running 3 sub-agents (0 done)");
+    assert_eq!(app.desired_status(), "running 3 sub-agents (0/3 done)");
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(plain.contains("↳ Audit auth"), "per-call rows: {plain:?}");
     assert!(plain.contains("↳ Scan CLI"), "per-call rows: {plain:?}");
 
     // Newest call resolving first: no "Thinking" flip, card held with the batch.
     app.apply_agent_tool_update("3".to_string(), None, Some("12 files".to_string()), false);
-    assert_eq!(app.desired_status(), "running 3 sub-agents (1 done)");
+    assert_eq!(app.desired_status(), "running 3 sub-agents (1/3 done)");
     assert!(app.current_action_label().is_some());
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(
@@ -69,7 +69,7 @@ fn test_parallel_bridged_batch_counts_and_lists_calls() {
     // All resolved → the batch is over: rows gone, cards render.
     app.apply_agent_tool_update("1".to_string(), None, Some("ok".to_string()), false);
     app.apply_agent_tool_update("2".to_string(), None, Some("ok".to_string()), true);
-    assert_ne!(app.desired_status(), "running 3 sub-agents (3 done)");
+    assert_ne!(app.desired_status(), "running 3 sub-agents (3/3 done)");
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(!plain.contains("↳ "), "live rows cleared: {plain:?}");
     assert!(plain.contains("Audit auth"), "cards render: {plain:?}");
@@ -86,7 +86,17 @@ fn test_parallel_bridged_batch_mixed_tools_noun() {
     ] {
         app.apply_agent_tool_call(Some(id.to_string()), name.to_string(), args, vec![], None);
     }
-    assert_eq!(app.desired_status(), "running 2 parallel steps (0 done)");
+    assert_eq!(app.desired_status(), "running 2 parallel steps (0/2 done)");
+    let status = app
+        .build_transcript()
+        .plain_lines
+        .into_iter()
+        .find(|line| line.contains("running 2 parallel steps"))
+        .expect("parallel status line");
+    assert!(
+        status.contains("(0/2 done · ") && !status.contains("done) ("),
+        "progress and timing share one group: {status:?}"
+    );
 }
 
 /// Clicking a folded `!cmd` block's `▸ +N more lines` expander reveals the full

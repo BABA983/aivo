@@ -544,7 +544,7 @@ fn test_parallel_subagent_rows_render_under_status_line() {
     app.apply_subagent_denied(1, "run_bash".to_string());
     app.apply_subagent_done(1, true, 8, 1200);
     // Headline counts completions; per-delegate rows sit under it.
-    assert_eq!(app.desired_status(), "running 2 sub-agents (1 done)");
+    assert_eq!(app.desired_status(), "running 2 sub-agents (1/2 done)");
     let lines = app.build_transcript().plain_lines;
     let running = lines
         .iter()
@@ -566,7 +566,7 @@ fn test_parallel_subagent_rows_render_under_status_line() {
     app.apply_subagent_slot(9, String::new(), String::new(), serde_json::Value::Null, 1);
     // Batch end retires the rows and hands the headline back.
     app.subagent_rows.clear();
-    assert_ne!(app.desired_status(), "running 2 sub-agents (1 done)");
+    assert_ne!(app.desired_status(), "running 2 sub-agents (1/2 done)");
 }
 
 #[test]
@@ -639,13 +639,12 @@ fn test_status_tail_shows_turn_output_tokens() {
     let mut app = make_test_app(tx, rx);
     app.sending = true;
     app.pending_response = "x".repeat(4_000); // ~1k tokens streamed
-    // A live ~-flagged estimate, alongside the always-present interrupt hint —
-    // stopping a runaway turn must be discoverable mid-turn.
+    // A live ~-flagged estimate remains visible without extra keyboard hints.
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(plain.contains("tokens"), "estimate shown: {plain:?}");
     assert!(
-        plain.contains("esc to interrupt"),
-        "esc hint in the agent-turn status: {plain:?}"
+        !plain.contains("esc to interrupt"),
+        "interrupt hint removed from agent-turn status: {plain:?}"
     );
     // The engine reports the turn's cumulative generated tokens → exact (no ~),
     // distinct from the prompt-dominated context total (which stays in the footer).

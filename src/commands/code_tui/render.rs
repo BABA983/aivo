@@ -898,17 +898,35 @@ pub(super) fn render_pending_status(
     if let Some(deadline) = deadline {
         elapsed = format!("{elapsed} / {}", format_request_elapsed(deadline));
     }
-    // Empty tail → just the clock.
-    let text = if tail.is_empty() {
-        format!("{spinner} {activity} ({elapsed})")
-    } else {
-        format!("{spinner} {activity} ({elapsed} • {tail})")
-    };
-    push_styled_line(
-        lines,
-        text,
-        Style::default().fg(MUTED()).add_modifier(Modifier::ITALIC),
+    let (activity, progress) = activity
+        .strip_suffix(')')
+        .and_then(|activity| activity.rsplit_once(" ("))
+        .map_or((activity, None), |(activity, progress)| {
+            (activity, Some(progress))
+        });
+    let detail = progress.map_or_else(
+        || format!(" ({elapsed}"),
+        |progress| format!(" ({progress} · {elapsed}"),
     );
+    let mut spans = vec![
+        Span::styled(
+            spinner.to_string(),
+            Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {activity}"),
+            Style::default().fg(MUTED()).add_modifier(Modifier::ITALIC),
+        ),
+        Span::styled(detail, Style::default().fg(FAINT())),
+    ];
+    if !tail.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {tail}"),
+            Style::default().fg(FAINT()),
+        ));
+    }
+    spans.push(Span::styled(")", Style::default().fg(FAINT())));
+    lines.push(line_with_plain(spans));
 }
 
 /// Row-name cap — short enough that the delegate's action stays visible.
