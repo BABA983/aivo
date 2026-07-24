@@ -2757,8 +2757,10 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_empty_state(&self, frame: &mut Frame<'_>, area: Rect) {
-        // Same inset as the intro banner (see `build_transcript_history_body`), so
-        // the banner doesn't jump once a message lands.
+        // `area` is the gutter-inset transcript text area; adding the header
+        // inset lands on the same column as the intro banner in
+        // `build_transcript_history_body`, so the banner doesn't jump once a
+        // message lands.
         let content_area = Rect {
             x: area.x.saturating_add(HEADER_LEFT_INSET),
             y: area.y.saturating_add(EMPTY_STATE_TOP_GAP),
@@ -2875,22 +2877,26 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_composer_text(&self) -> Text<'static> {
+        let prompt = Span::styled(
+            format!("{} ", self.composer_prompt_glyph()),
+            self.composer_prompt_style(),
+        );
         let mut lines = composer_attachment_lines(&self.draft_attachments);
         if self.draft.is_empty() {
             let placeholder = if self.loading_resume.is_some() {
                 Span::styled("Resume loading…", Style::default().fg(FAINT()))
             } else if self.sending {
                 Span::styled(
-                    " Type to queue your next message…",
+                    "Type to queue your next message…",
                     Style::default().fg(FAINT()),
                 )
             } else {
                 Span::styled(
-                    " Ask, plan, or build · / for commands",
+                    "Ask, plan, or build · / for commands",
                     Style::default().fg(FAINT()),
                 )
             };
-            lines.push(Line::from(vec![Span::raw(" "), placeholder]));
+            lines.push(Line::from(vec![prompt, placeholder]));
             return Text::from(lines);
         }
 
@@ -2898,19 +2904,24 @@ impl CodeTuiApp {
         // `> /mcp [add … | rm <name>]`. Only set when the draft is a single line.
         let ghost = self.composer_command_hint();
         // A `!cmd` draft is tinted in the magenta shell hue, so shell mode reads at
-        // a glance — its border picks up the same magenta color.
+        // a glance — the prompt and border pick up the same magenta color.
         let draft_color = if self.draft_is_shell_command() {
             SHELL()
         } else {
             TEXT()
         };
-        // Every row gets a one-cell inset off the border, so wrapped text
-        // aligns under the first character.
+        // Row 0 carries the in-box `❯ ` prompt; wrapped rows get a same-width
+        // hanging indent so text aligns under the first character.
         let rows = composer_visual_rows(&self.draft, self.composer_text_width());
         let last = rows.len().saturating_sub(1);
         for (index, &(start, end)) in rows.iter().enumerate().skip(self.composer_scroll) {
+            let prefix = if index == 0 {
+                prompt.clone()
+            } else {
+                Span::raw("  ")
+            };
             let mut spans = vec![
-                Span::raw(" "),
+                prefix,
                 Span::styled(
                     self.draft[start..end].to_string(),
                     Style::default().fg(draft_color),
@@ -2928,6 +2939,25 @@ impl CodeTuiApp {
         }
 
         Text::from(lines)
+    }
+
+    fn composer_prompt_glyph(&self) -> &'static str {
+        if self.draft_history_index.is_some() {
+            "^"
+        } else {
+            "❯"
+        }
+    }
+
+    fn composer_prompt_style(&self) -> Style {
+        let color = if self.draft_history_index.is_some() {
+            ACCENT()
+        } else if self.draft_is_shell_command() {
+            SHELL()
+        } else {
+            USER()
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
     /// Scroll the draft within the composer so the cursor's visual row stays

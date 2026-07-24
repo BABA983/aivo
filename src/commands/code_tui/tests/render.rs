@@ -99,7 +99,7 @@ fn test_render_main_keeps_composer_near_short_empty_transcript() {
         app.transcript_hitbox.as_ref().unwrap().area.y,
         APP_TOP_MARGIN
     );
-    let expected_width = 80 - APP_LEFT_MARGIN - TRANSCRIPT_RIGHT_MARGIN;
+    let expected_width = 80 - APP_LEFT_MARGIN - ACCENT_GUTTER_WIDTH - TRANSCRIPT_RIGHT_MARGIN;
     assert_eq!(
         app.transcript_hitbox.as_ref().unwrap().area.width,
         expected_width
@@ -909,7 +909,7 @@ fn test_render_main_uses_full_height_for_long_transcript() {
         app.transcript_hitbox.as_ref().unwrap().area.y,
         APP_TOP_MARGIN
     );
-    let expected_width = 80 - APP_LEFT_MARGIN - TRANSCRIPT_RIGHT_MARGIN;
+    let expected_width = 80 - APP_LEFT_MARGIN - ACCENT_GUTTER_WIDTH - TRANSCRIPT_RIGHT_MARGIN;
     assert_eq!(
         app.transcript_hitbox.as_ref().unwrap().area.width,
         expected_width

@@ -680,7 +680,7 @@ pub(super) fn centered_rect_fixed(width: u16, height: u16, area: Rect) -> Rect {
 /// Wrap the composer `draft` into visual rows, soft-wrapping each logical line
 /// (split on `\n`) at `text_width` display columns. Returns each row's
 /// `[start, end)` byte range into `draft`. Every visual row carries the same
-/// 2-col left margin in the render (the `> ` prompt on row 0, a hanging indent
+/// left margin in the render (the `❯ ` prompt on row 0, a hanging indent
 /// elsewhere), so callers wrap at `composer_width - COMPOSER_PREFIX_WIDTH`.
 ///
 /// Wraps at word boundaries: an overflowing word moves whole to the next row,

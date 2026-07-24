@@ -347,8 +347,9 @@ pub(super) const WELCOME_TIPS: &[&str] = &[
     "type while the agent works to queue your next message",
     "/new starts a fresh session, keeping your keys",
 ];
-// Keeps typed text aligned with transcript turns while the glyph occupies the border.
-pub(super) const COMPOSER_PREFIX_WIDTH: u16 = 1;
+// In-box `❯ ` prompt flush to the border (matching the zero vertical padding),
+// with a 1-cell gap to the text.
+pub(super) const COMPOSER_PREFIX_WIDTH: u16 = 2;
 pub(super) const DEFAULT_CHAT_SCROLL_SPEED: usize = 3;
 pub(super) const MAX_CHAT_SCROLL_SPEED: usize = 50;
 pub(super) const TOAST_DURATION: Duration = Duration::from_secs(3);
@@ -391,12 +392,13 @@ pub(super) const TYPEWRITER_CATCHUP_DIVISOR: usize = 2;
 /// repaint; leftover events are drained on the next tick.
 pub(super) const MAX_INPUT_EVENTS_PER_TICK: usize = 512;
 
-// No message indent (formerly the accent-bar gutter), keeping user turns aligned
-// with the composer prompt below.
-pub(super) const ACCENT_GUTTER_WIDTH: u16 = 0;
+// One-column message indent so transcript `❯`/`⏺` markers line up with the
+// composer's in-box prompt (border col 0, glyph col 1) and text columns match.
+pub(super) const ACCENT_GUTTER_WIDTH: u16 = 1;
 
-// The welcome header (banner + tip) is inset this many columns past the messages.
-pub(super) const HEADER_LEFT_INSET: u16 = 2;
+// The welcome header (banner + tip) sits on the message column itself; its
+// 1-col left padding then mirrors the 1-row `EMPTY_STATE_TOP_GAP` above it.
+pub(super) const HEADER_LEFT_INSET: u16 = 0;
 
 // Right margin so wrapped prose stops short of the terminal edge; chrome (divider,
 // composer, footer) stays full-bleed.

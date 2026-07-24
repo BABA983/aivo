@@ -470,7 +470,7 @@ fn test_composer_placeholder_stays_plain_when_history_has_reasoning() {
     let line = app.render_composer_text().lines[0].clone();
     let plain = plain_text_from_spans(&line.spans);
 
-    assert_eq!(plain, "  Ask, plan, or build · / for commands");
+    assert_eq!(plain, "❯ Ask, plan, or build · / for commands");
 }
 
 #[test]
