@@ -24,6 +24,29 @@ pub fn home_dir() -> Option<PathBuf> {
     }
 }
 
+/// Home from the OS user database, for when `$HOME` is known to be redirected.
+#[cfg(unix)]
+pub fn passwd_home_dir() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: getpwuid returns a pointer to static thread-local storage valid
+    // until the next getpwuid call on this thread. We copy pw_dir immediately.
+    unsafe {
+        let passwd = libc::getpwuid(libc::getuid());
+        if passwd.is_null() {
+            return None;
+        }
+        let dir = (*passwd).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let bytes = std::ffi::CStr::from_ptr(dir).to_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+    }
+}
+
 /// Best-effort current username lookup.
 /// Tries the USER/USERNAME environment variable first, then falls back to the
 /// OS user database via libc on Unix (unaffected by sudo USER overrides or
