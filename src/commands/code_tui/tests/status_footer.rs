@@ -239,17 +239,14 @@ fn test_composer_rule_drops_cycle_hint_when_narrow() {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
     // Wide: badge + keybinding hint inset on the rule.
-    assert!(plain(app.composer_rule_line(80)).contains("⚡ auto-approve (shift+tab)"));
+    assert!(plain(app.composer_rule_line(80)).contains("⚡auto-approve (shift+tab)"));
     // Phone-width: the hint goes first; the badge stays inset on the rule.
     let narrow = plain(app.composer_rule_line(44));
-    assert!(
-        narrow.contains("⚡ auto-approve"),
-        "narrow rule: {narrow:?}"
-    );
+    assert!(narrow.contains("⚡auto-approve"), "narrow rule: {narrow:?}");
     assert!(!narrow.contains("shift+tab"), "narrow rule: {narrow:?}");
     assert!(narrow.starts_with('─'), "still reads as a rule: {narrow:?}");
     // Too narrow even for that: the bare badge.
-    assert_eq!(plain(app.composer_rule_line(18)), "⚡ auto-approve");
+    assert_eq!(plain(app.composer_rule_line(18)), "⚡auto-approve");
 }
 
 #[test]
