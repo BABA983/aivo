@@ -6,7 +6,9 @@
 use anyhow::{Context, Result};
 use rand::RngCore;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const ACCOUNT_ID_LEN: usize = 12;
