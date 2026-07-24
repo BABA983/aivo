@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use rand::RngCore;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const ACCOUNT_ID_LEN: usize = 12;
 const ACCOUNTS_DIR_NAME: &str = "cursor-accounts";
@@ -111,10 +111,18 @@ impl CursorShadow {
     /// Returned as a `Vec` so callers can `cmd.env(name, value)` over it
     /// regardless of whether they hold a `Command` or a `HashMap`.
     pub fn env_block(&self) -> Vec<(&'static str, OsString)> {
-        let mut out = Vec::with_capacity(3);
+        let mut out = Vec::with_capacity(4);
         let root_os = OsString::from(&self.root);
         let cursor_dir_os = OsString::from(self.cursor_dir());
 
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("GIT_CONFIG_GLOBAL").is_none()
+            && let Some(home) = crate::services::system_env::home_dir()
+            && let Some(config) = discover_global_git_config(&home)
+        {
+            // HOME isolation must not erase the user's Git identity and aliases.
+            out.push(("GIT_CONFIG_GLOBAL", config.into_os_string()));
+        }
         #[cfg(target_os = "macos")]
         out.push(("HOME", root_os));
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -133,6 +141,12 @@ impl CursorShadow {
         out.push(("CURSOR_DATA_DIR", cursor_dir_os));
         out
     }
+}
+
+fn discover_global_git_config(home: &Path) -> Option<PathBuf> {
+    [home.join(".gitconfig"), home.join(".config/git/config")]
+        .into_iter()
+        .find(|path| path.is_file())
 }
 
 fn ensure_valid_account_id(id: &str) -> Result<()> {
@@ -323,5 +337,18 @@ mod tests {
         assert!(names.contains(&"HOME"));
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         assert!(names.contains(&"XDG_CONFIG_HOME"));
+    }
+
+    #[test]
+    fn global_git_config_prefers_dotfile_and_falls_back_to_xdg() {
+        let home = tempfile::tempdir().unwrap();
+        let xdg = home.path().join(".config/git/config");
+        std::fs::create_dir_all(xdg.parent().unwrap()).unwrap();
+        std::fs::write(&xdg, "[user]\nname = xdg\n").unwrap();
+        assert_eq!(discover_global_git_config(home.path()), Some(xdg.clone()));
+
+        let dotfile = home.path().join(".gitconfig");
+        std::fs::write(&dotfile, "[user]\nname = dotfile\n").unwrap();
+        assert_eq!(discover_global_git_config(home.path()), Some(dotfile));
     }
 }
