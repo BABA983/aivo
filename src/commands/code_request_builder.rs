@@ -10,12 +10,15 @@ use super::code::ChatMessage;
 
 /// Lowest `reasoning_effort` to send when thinking is off, or `None` for a
 /// non-reasoning model that 400s on the field. Catalog-first: the gpt-5 family
-/// diverged (5.0 → `minimal`, 5.1+/5.4 → `none`, codex → `low`), so a name guess
+/// diverged (5.0 → `minimal`, 5.1+ → `none`, codex → `low`), so a name guess
 /// 400s; the snapshot resolves it, name heuristics cover snapshot-absent models.
 fn openai_chat_no_thinking_value(model: &str) -> Option<&'static str> {
+    let rejects_minimal = crate::services::model_metadata::gpt_rejects_effort_minimal(model);
     if let Some(limits) = crate::services::model_metadata::snapshot_limits(model) {
         for level in ["none", "minimal", "low"] {
-            if limits.reasoning_efforts.iter().any(|e| e.as_str() == level) {
+            if (level != "minimal" || !rejects_minimal)
+                && limits.reasoning_efforts.iter().any(|e| e.as_str() == level)
+            {
                 return Some(level);
             }
         }
@@ -26,8 +29,14 @@ fn openai_chat_no_thinking_value(model: &str) -> Option<&'static str> {
     }
     let lower = model.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
-    if name.starts_with("gpt-5") || name.contains("codex") {
-        Some("minimal")
+    if name.contains("codex") {
+        Some("low")
+    } else if name.starts_with("gpt-5") {
+        if rejects_minimal {
+            Some("none")
+        } else {
+            Some("minimal")
+        }
     } else if name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4") {
         Some("low")
     } else {
@@ -422,10 +431,11 @@ mod tests {
 
     #[test]
     fn test_openai_chat_disable_uses_catalog_off_level() {
-        // gpt-5 family diverged: 5.0 → minimal, 5.1+/5.4 → none, codex → low.
+        // 5.0 → minimal, 5.1+ → none (minimal dropped), codex → low.
         for (model, expected) in [
             ("gpt-5", "minimal"),
             ("gpt-5-mini", "minimal"),
+            ("gpt-5.1", "none"),
             ("gpt-5.2", "none"),
             ("gpt-5.4", "none"),
             ("gpt-5-codex", "low"),
@@ -504,7 +514,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(gpt5["reasoning"]["effort"], "none"); // gpt-5.4 dropped minimal
+        assert_eq!(gpt5["reasoning"]["effort"], "none"); // 5.1+ off level is none
 
         let gpt4o = build_responses_request(
             "gpt-4o",

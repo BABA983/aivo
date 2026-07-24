@@ -150,10 +150,14 @@ fn overlay_override(
 fn fold_rows(rows: std::collections::BTreeMap<String, LimitRow>) -> HashMap<String, ModelLimits> {
     let mut map: HashMap<String, ModelLimits> = HashMap::with_capacity(rows.len());
     for (id, row) in rows {
-        let Some(limits) = parse_row(&row) else {
+        let Some(mut limits) = parse_row(&row) else {
             continue;
         };
         let key = fold(&id);
+        // Corrects stale override caches too, not just the embedded data.
+        if gpt_rejects_effort_minimal(&key) {
+            limits.reasoning_efforts.retain(|e| e != "minimal");
+        }
         match map.get_mut(&key) {
             Some(prev) if prev.context.unwrap_or(0) >= limits.context.unwrap_or(0) => {
                 // The loser may know prices the winner lacks — a zero-priced
@@ -285,6 +289,35 @@ pub fn rejects_temperature(model: &str) -> bool {
     snapshot_limits(model).is_some_and(|limits| !limits.temperature)
 }
 
+/// gpt-5.1+ 400s `reasoning_effort: "minimal"` (`none` replaced it) but stale
+/// catalogs still advertise it. Matches folded/vendor-prefixed spellings and
+/// the fused aggregator form (`gpt-52` = 5.2); unknown ids return false.
+pub fn gpt_rejects_effort_minimal(model: &str) -> bool {
+    let folded = fold(model);
+    folded.match_indices("gpt-").any(|(i, _)| {
+        let rest = &folded[i + 4..];
+        let seg = rest.split('-').next().unwrap_or_default();
+        let digits: &str = &seg[..seg.chars().take_while(char::is_ascii_digit).count()];
+        let (major, minor) = match digits.len() {
+            0 => return false,
+            2 => (digits[..1].parse::<u32>(), digits[1..].parse::<u32>()),
+            _ => {
+                let minor = (seg == digits)
+                    .then(|| rest.split('-').nth(1))
+                    .flatten()
+                    .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(0);
+                (digits.parse::<u32>(), Ok(minor))
+            }
+        };
+        match (major, minor) {
+            (Ok(major), Ok(minor)) => major > 5 || (major == 5 && minor >= 1),
+            _ => false,
+        }
+    })
+}
+
 /// Capability sets for this process's local llama-server. Static because
 /// `ResolvedLimits.caps` borrows `'static`; context comes from `SpawnInfo`.
 static HF_LOCAL_CAPS_TEXT: LazyLock<ModelLimits> = LazyLock::new(|| hf_local_caps(false));
@@ -357,6 +390,16 @@ pub async fn resolve_limits(
         None => None,
     };
     let snap = snapshot_limits(stripped);
+    // Live catalog wins when it advertises levels; else the snapshot's.
+    let mut reasoning_efforts = live
+        .as_ref()
+        .map(|m| m.reasoning_efforts.clone())
+        .filter(|v| !v.is_empty())
+        .or_else(|| snap.map(|s| s.reasoning_efforts.clone()))
+        .unwrap_or_default();
+    if gpt_rejects_effort_minimal(stripped) {
+        reasoning_efforts.retain(|e| e != "minimal");
+    }
     ResolvedLimits {
         // `--max-context` override: fills an unknown window, never overrides a known one.
         context: live
@@ -368,13 +411,7 @@ pub async fn resolve_limits(
             .as_ref()
             .and_then(|m| m.max_output_tokens)
             .or_else(|| snap.and_then(|s| s.output)),
-        // Live catalog wins when it advertises levels; else the snapshot's.
-        reasoning_efforts: live
-            .as_ref()
-            .map(|m| m.reasoning_efforts.clone())
-            .filter(|v| !v.is_empty())
-            .or_else(|| snap.map(|s| s.reasoning_efforts.clone()))
-            .unwrap_or_default(),
+        reasoning_efforts,
         caps: snap,
     }
 }
@@ -612,6 +649,73 @@ mod tests {
         for bad in ["", "abc", "0", "-5", "10g", "k"] {
             assert_eq!(parse_context_size(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn gpt_rejects_effort_minimal_covers_5_1_plus_spellings() {
+        for id in [
+            "gpt-5.1",
+            "gpt-5-1-codex-max",
+            "gpt-5.2",
+            "gpt-5-2",
+            "gpt-5.3-codex",
+            "gpt-5.4-mini-2026-03-17",
+            "gpt-5.6-luna",
+            "openai/gpt-5.4",
+            "openai.gpt-5.5",
+            "databricks-gpt-5-2",
+            "openai-gpt-52", // fused aggregator spelling
+            "gpt-6",
+        ] {
+            assert!(gpt_rejects_effort_minimal(id), "{id} must reject minimal");
+        }
+        for id in [
+            "gpt-5",
+            "gpt-5-chat",
+            "gpt-5-mini",
+            "gpt-4.1",
+            "gpt-41", // fused 4.1
+            "chatgpt-4o-latest",
+            "gpt-oss-120b",
+            "o3",
+            "claude-opus-4-8",
+        ] {
+            assert!(!gpt_rejects_effort_minimal(id), "{id} must keep minimal");
+        }
+    }
+
+    #[test]
+    fn snapshot_strips_minimal_for_gpt_5_1_plus() {
+        // The load-time retain protects stale overlay caches; "none" must
+        // survive it — 5.1+ accept none (it replaced minimal).
+        use std::collections::BTreeMap;
+        let stale_row = |efforts: &str| {
+            vec![
+                serde_json::json!(400_000),
+                serde_json::json!(128_000),
+                serde_json::json!("tr"),
+                serde_json::json!(efforts),
+            ]
+        };
+        let mut rows: BTreeMap<String, LimitRow> = BTreeMap::new();
+        rows.insert("gpt-5.2".into(), stale_row("none,minimal,low,medium,high"));
+        rows.insert("gpt-5".into(), stale_row("minimal,low,medium,high"));
+        let folded = fold_rows(rows);
+        assert_eq!(
+            folded["gpt-5-2"].reasoning_efforts,
+            ["none", "low", "medium", "high"].map(String::from)
+        );
+        assert_eq!(
+            folded["gpt-5"].reasoning_efforts,
+            ["minimal", "low", "medium", "high"].map(String::from)
+        );
+
+        // And the shipped snapshot agrees end-to-end.
+        let g52 = &snapshot_limits("gpt-5.2").unwrap().reasoning_efforts;
+        assert!(g52.iter().any(|e| e == "none"), "{g52:?}");
+        assert!(!g52.iter().any(|e| e == "minimal"), "{g52:?}");
+        let g5 = &snapshot_limits("gpt-5").unwrap().reasoning_efforts;
+        assert!(g5.iter().any(|e| e == "minimal"), "{g5:?}");
     }
 
     #[test]

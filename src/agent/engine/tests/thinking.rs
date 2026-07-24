@@ -83,6 +83,21 @@ fn thinking_request_disables_per_provider_disable_form() {
     g54.set_thinking_enabled(false);
     assert_eq!(g54.thinking_request(), (Some("none"), false));
 
+    // No catalog: the 5.1+ heuristic guesses `none`, never the 400ing `minimal`.
+    let mut g54_bare = AgentEngine::new("/tmp", "gpt-5.4", "", &[], &[], 0, 0);
+    g54_bare.set_thinking_enabled(false);
+    assert_eq!(g54_bare.thinking_request(), (Some("none"), false));
+
+    // A stale catalog advertising `minimal` for 5.1+ must not resurrect it.
+    let mut g51 = AgentEngine::new("/tmp", "gpt-5.1", "", &[], &[], 0, 0);
+    g51.set_reasoning_efforts(
+        ["minimal", "low", "medium", "high"]
+            .map(String::from)
+            .to_vec(),
+    );
+    g51.set_thinking_enabled(false);
+    assert_eq!(g51.thinking_request(), (Some("low"), false));
+
     // codex advertises only low/medium/high → its `low` floor, not `minimal`.
     let mut codex = AgentEngine::new("/tmp", "gpt-5-codex", "", &[], &[], 0, 0);
     codex.set_reasoning_efforts(["low", "medium", "high"].map(String::from).to_vec());

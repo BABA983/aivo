@@ -340,7 +340,7 @@ questions.",
 
     /// Thinking control for this step: `(reasoning_effort, emit_thinking_disabled)`.
     /// Enabled → resolved level. Disabled → the lowest "off" the catalog advertises
-    /// (gpt-5 diverged: 5.0 `minimal`, 5.1+/5.4 `none`, codex `low` — a guess 400s);
+    /// (gpt-5 diverged: 5.0 `minimal`, 5.1+ `none`, codex `low` — a guess 400s);
     /// a depth-only scale with no off (aivo/starter, Anthropic) → `thinking:{type:"disabled"}`.
     pub(super) fn thinking_request(&self) -> (Option<&str>, bool) {
         if self.thinking_enabled {
@@ -360,16 +360,22 @@ questions.",
         }
         let lower = self.model.to_ascii_lowercase();
         let name = lower.rsplit('/').next().unwrap_or(&lower);
+        let rejects_minimal = crate::services::model_metadata::gpt_rejects_effort_minimal(name);
         if self.effort_is_valid("none") {
             (Some("none"), false)
-        } else if self.effort_is_valid("minimal") {
+        } else if self.effort_is_valid("minimal") && !rejects_minimal {
             (Some("minimal"), false)
-        } else if name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4") {
+        } else if name.starts_with("o1")
+            || name.starts_with("o3")
+            || name.starts_with("o4")
+            || name.contains("codex")
+        {
             (Some("low"), false)
-        } else if name.starts_with("gpt-5") || name.contains("codex") {
-            // codex floor is low (no off); snapshot-absent gpt-5.0 → minimal.
+        } else if name.starts_with("gpt-5") {
             if self.effort_is_valid("low") {
                 (Some("low"), false)
+            } else if rejects_minimal {
+                (Some("none"), false)
             } else {
                 (Some("minimal"), false)
             }
