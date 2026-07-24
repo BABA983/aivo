@@ -56,7 +56,8 @@ pub fn plan_tool_spec() -> ToolSpec {
         name: "update_plan".to_string(),
         description: "Record or update a step-by-step plan for a multi-step task. Always send the \
 COMPLETE ordered list (not a delta). Mark the step you're working on `in_progress` and flip each \
-step to `completed` the moment you finish it. Call this when you begin a multi-step task and again \
+step to `completed` the moment its work is actually done (not merely intended). Call this when you \
+begin a multi-step task and again \
 every time a step's status changes — and ALWAYS send a final call marking every step `completed` \
 once the task is done, so the plan doesn't linger as unfinished. Skip it for trivial one-step work."
             .to_string(),
