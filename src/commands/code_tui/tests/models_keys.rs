@@ -49,6 +49,47 @@ async fn effort_command_sets_level_enables_thinking_and_validates() {
 }
 
 #[tokio::test]
+async fn effort_picker_preselects_active_level_or_middle() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.model_reasoning_efforts = vec!["low".into(), "medium".into(), "high".into()];
+
+    // Nothing chosen → the default ("medium") is in effect: highlighted + marked.
+    app.reasoning_effort = None;
+    app.run_effort_command(None).await;
+    let Overlay::Picker(p) = &app.overlay else {
+        panic!("expected effort picker");
+    };
+    assert_eq!(p.selected, 1);
+    assert!(p.items[1].label.contains("(current)"));
+
+    // A saved choice wins over the default.
+    app.reasoning_effort = Some("high".into());
+    app.run_effort_command(None).await;
+    let Overlay::Picker(p) = &app.overlay else {
+        panic!("expected effort picker");
+    };
+    assert_eq!(p.selected, 2);
+    assert!(p.items[2].label.contains("(current)"));
+
+    // No "medium" in the list → the middle level stands in.
+    app.reasoning_effort = None;
+    app.model_reasoning_efforts = vec![
+        "none".into(),
+        "low".into(),
+        "high".into(),
+        "xhigh".into(),
+        "max".into(),
+    ];
+    app.run_effort_command(None).await;
+    let Overlay::Picker(p) = &app.overlay else {
+        panic!("expected effort picker");
+    };
+    assert_eq!(p.selected, 2);
+    assert!(p.items[2].label.contains("(current)"));
+}
+
+#[tokio::test]
 async fn effort_command_noop_when_model_has_no_levels() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);

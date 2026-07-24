@@ -114,7 +114,8 @@ impl CodeTuiApp {
     }
 
     fn open_effort_picker(&mut self) {
-        let current = self.reasoning_effort.clone();
+        // Marker + highlight follow the in-effect level (matches footer badge).
+        let current = self.effective_reasoning_effort();
         let items: Vec<PickerEntry> = self
             .model_reasoning_efforts
             .iter()
@@ -168,7 +169,7 @@ impl CodeTuiApp {
 
     /// The effort the engine will request: the user's `/effort` choice, else —
     /// for a model with levels — the default (env or `medium`) if valid, else the
-    /// first level; `None` when the model has no levels. Keeps the footer badge in
+    /// middle level; `None` when the model has no levels. Keeps the footer badge in
     /// step with what's sent and lets catalog-only models reason by default.
     pub(super) fn effective_reasoning_effort(&self) -> Option<String> {
         if let Some(level) = &self.reasoning_effort {
@@ -181,7 +182,8 @@ impl CodeTuiApp {
         if self.model_reasoning_efforts.contains(&default) {
             Some(default)
         } else {
-            self.model_reasoning_efforts.first().cloned()
+            let mid = (self.model_reasoning_efforts.len() - 1) / 2;
+            self.model_reasoning_efforts.get(mid).cloned()
         }
     }
 
