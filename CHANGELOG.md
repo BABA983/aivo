@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.42.1
+
+A follow-up pass on the coding-agent TUI and reasoning effort. The prompt box is redesigned: the composer closes into a full rounded box with the `❯` caret flush inside its border, and the banner, transcript markers, and composer now share one column, so everything lines up down the left edge. The footer regroups into workspace and engine halves and the auto-approve badge swaps its emoji bolt — which rendered full-color and double-width — for a text-width `↯` that takes the amber style like the other badges. On the effort side, `minimal` is now stripped for gpt-5.1+ reasoning models that reject it, including at snapshot load so a stale override can't resurrect it, and the `/effort` picker opens pre-selected on the level that's actually in effect.
+
+- feat(code): redesign the prompt box and alignment (b51aa30b)
+- feat(code): /effort picker pre-selects the effective level (baf34dfb)
+- fix(effort): strip "minimal" for gpt-5.1+ reasoning models (6b19cc85)
+- fix(code): swap auto-approve badge ⚡ for text-width ↯ (b7935db0)
+
 ## v0.42.0
 
 A coding-agent polish release with reach beyond the desktop. `aivo serve` now serves Cursor keys through the ACP bridge, so a headless or remote host can drive Cursor the same way the local TUI does — with remote-driven shells kept inside the shadow env where they belong. Plan mode grows a memory: `/plan save`, a continue-or-discard prompt on `/new`, and resume from a saved file or an interrupted plan. The system prompt is sharpened with restraint and voice rules. The code TUI gets a broad visual pass — rounded composer chrome (and the prompt glyph retired, since the cursor is enough), a regrouped footer that closes the composer with a rule and fits chrome down to phone widths, flush turn markers with the accent gutter dropped, and tighter spacing across the parallel status line, auto-approve badge, and app edges. Rounding out the release: Windows parity fixes for login, shadow state, secrets, and jobs, plus macOS shadow fixes that restore real user env and global git config in shells spawned under shadows.
