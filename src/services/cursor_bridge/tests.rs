@@ -105,6 +105,34 @@ async fn options_preflight_returns_cors() {
     assert!(response.contains("Access-Control-Allow-Origin: *"));
 }
 
+#[tokio::test]
+async fn start_on_listener_serves_probe_on_caller_bound_port() {
+    let (listener, port) = bind_local_listener().await.unwrap();
+    let router = CursorModelRouter::new(CursorRouterConfig {
+        key: fake_key(),
+        workspace_cwd: "/tmp".to_string(),
+        models_cache: None,
+        prewarm_count: 0,
+        mcp_prewarm_id_style: None,
+        expected_token: None,
+    });
+    let handle = router.start_on_listener(listener).await.unwrap();
+
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let _ = stream.shutdown().await;
+    let mut buf = Vec::new();
+    let _ = stream.read_to_end(&mut buf).await;
+    handle.abort();
+    let response = String::from_utf8(buf).unwrap();
+    assert!(response.contains("200 OK"));
+}
+
 #[test]
 fn models_response_body_satisfies_both_openai_and_codex_consumers() {
     // Regression: codex 0.132+ parses /models as `ModelsResponse { models }`

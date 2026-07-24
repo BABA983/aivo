@@ -101,6 +101,18 @@ impl ServeCommand {
             return Ok(ExitCode::UserError);
         }
 
+        if key.is_cursor_acp() {
+            return serve_cursor(CursorServeParams {
+                key,
+                host,
+                port,
+                auth_token,
+                log_requested: log.is_some(),
+                failover_count: failover_keys.len(),
+            })
+            .await;
+        }
+
         if is_self_proxy_target(&key.base_url, port, &host) {
             anyhow::bail!(
                 "Refusing to start `aivo serve`: active upstream {} points back to http://{}:{} and would proxy into itself. Switch to a real provider key with `aivo use <name>` or pass `--key <name>`.",
@@ -303,6 +315,124 @@ impl ServeCommand {
             style::dim("aivo serve hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF")
         );
     }
+}
+
+struct CursorServeParams {
+    key: ApiKey,
+    host: String,
+    port: u16,
+    auth_token: Option<String>,
+    log_requested: bool,
+    failover_count: usize,
+}
+
+/// Serve a cursor key through the same ACP→HTTP bridge native launches use.
+async fn serve_cursor(params: CursorServeParams) -> Result<ExitCode> {
+    use crate::services::cursor_acp;
+    use crate::services::cursor_bridge::{CursorModelRouter, CursorRouterConfig};
+
+    let CursorServeParams {
+        key,
+        host,
+        port,
+        auth_token,
+        log_requested,
+        failover_count,
+    } = params;
+
+    if cursor_acp::is_legacy_cursor_login_secret(key.key.as_str()) {
+        eprintln!(
+            "{} This cursor key predates per-account isolation. Remove it (`aivo keys rm {}`) and re-add (`aivo keys add cursor`).",
+            style::red("Error:"),
+            key.name
+        );
+        return Ok(ExitCode::AuthError);
+    }
+    // Fail before binding rather than on the first request.
+    if cursor_acp::cursor_oauth_shadow_signed_out(&key).await {
+        eprintln!(
+            "{} Cursor is not logged in for this key. Run `aivo keys reauth {}` to sign in again.",
+            style::red("Error:"),
+            key.name
+        );
+        return Ok(ExitCode::AuthError);
+    }
+
+    if failover_count > 0 {
+        eprintln!(
+            "  {} --failover is ignored for cursor keys",
+            style::yellow("!"),
+        );
+    }
+    if log_requested {
+        eprintln!("  {} --log is ignored for cursor keys", style::yellow("!"),);
+    }
+
+    let display_name = key.display_name().to_string();
+    let workspace_cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(String::from))
+        .unwrap_or_else(|| ".".to_string());
+    let router = CursorModelRouter::new(CursorRouterConfig {
+        key,
+        workspace_cwd,
+        models_cache: Some(crate::services::models_cache::ModelsCache::new()),
+        // No cursor-agent process until the first request needs one.
+        prewarm_count: 0,
+        mcp_prewarm_id_style: None,
+        expected_token: auth_token.clone(),
+    });
+
+    let listener = crate::services::serve_router::bind_serve_listener(&host, port).await?;
+    let bound_port = listener.local_addr()?.port();
+    let mut handle = router.start_on_listener(listener).await?;
+
+    let display_addr = if host.contains(':') {
+        format!("[{}]", host)
+    } else {
+        host.clone()
+    };
+    eprintln!(
+        "{} Listening on http://{}:{}",
+        style::success_symbol(),
+        display_addr,
+        bound_port
+    );
+    eprintln!(
+        "  {} · {}",
+        display_name,
+        style::dim("cursor-agent ACP bridge")
+    );
+    if let Some(ref token) = auth_token {
+        eprintln!("  auth: {}", style::dim(token));
+    }
+    eprintln!(
+        "  {} first request starts cursor-agent (may take a few seconds)",
+        style::dim("·")
+    );
+    eprintln!("  {}", style::dim("Press Ctrl+C to stop"));
+
+    #[allow(clippy::let_unit_value)]
+    let mut sigterm = signal_terminate()?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal?;
+            eprintln!("\n  Shutting down...");
+            handle.abort();
+        }
+        _ = sigterm_recv(&mut sigterm) => {
+            eprintln!("\n  Shutting down (SIGTERM)...");
+            handle.abort();
+        }
+        result = &mut handle => match result {
+            Ok(Ok(())) => anyhow::bail!("cursor router stopped unexpectedly"),
+            Ok(Err(err)) => return Err(err),
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => anyhow::bail!("cursor router task failed: {}", err),
+        },
+    }
+
+    Ok(ExitCode::Success)
 }
 
 /// Drains the router's join handle after a shutdown notify, with a 6s

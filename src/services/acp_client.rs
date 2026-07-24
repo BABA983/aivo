@@ -104,9 +104,40 @@ pub struct AcpClient {
     session_handlers: SessionMap,
     request_timings: RequestTimings,
     stderr_tail: StderrTail,
-    child: Mutex<Option<Child>>,
+    child: Arc<Mutex<Option<Child>>>,
     _reader: JoinHandle<()>,
     _stderr_drain: JoinHandle<()>,
+}
+
+/// Spawned ACP children, reaped explicitly: aivo exits via `process::exit`,
+/// which skips `kill_on_drop`, and cursor-agent ignores stdin EOF.
+static ACP_CHILDREN: std::sync::Mutex<Vec<std::sync::Weak<Mutex<Option<Child>>>>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn register_acp_child(slot: &Arc<Mutex<Option<Child>>>) {
+    let mut reg = ACP_CHILDREN.lock().unwrap();
+    reg.retain(|w| w.strong_count() > 0);
+    reg.push(Arc::downgrade(slot));
+}
+
+/// Kill every live ACP child (see [`ACP_CHILDREN`]).
+pub async fn kill_all_acp_children() {
+    let live: Vec<_> = {
+        let mut reg = ACP_CHILDREN.lock().unwrap();
+        let live = reg.iter().filter_map(|w| w.upgrade()).collect();
+        reg.clear();
+        live
+    };
+    kill_children(live).await;
+}
+
+async fn kill_children(slots: Vec<Arc<Mutex<Option<Child>>>>) {
+    for slot in slots {
+        if let Some(mut child) = slot.lock().await.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
 }
 
 impl AcpClient {
@@ -170,6 +201,8 @@ impl AcpClient {
         );
         let stderr_drain = spawn_stderr_drain(BufReader::new(stderr), stderr_tail.clone());
 
+        let child_slot = Arc::new(Mutex::new(Some(child)));
+        register_acp_child(&child_slot);
         Ok(Self {
             writer,
             next_id: AtomicU64::new(1),
@@ -177,7 +210,7 @@ impl AcpClient {
             session_handlers: sessions,
             request_timings,
             stderr_tail,
-            child: Mutex::new(Some(child)),
+            child: child_slot,
             _reader: reader,
             _stderr_drain: stderr_drain,
         })
@@ -780,6 +813,31 @@ mod tests {
         let mut cmd = TokioCommand::new("sh");
         cmd.arg("-c").arg(script);
         cmd
+    }
+
+    #[tokio::test]
+    async fn spawn_registers_child_in_reap_registry() {
+        let client = AcpClient::spawn(fake_acp_script("sleep 30")).await.unwrap();
+        // Pointer-match our entry — other tests spawn concurrently.
+        let registered = ACP_CHILDREN
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w.upgrade())
+            .any(|slot| Arc::ptr_eq(&slot, &client.child));
+        assert!(registered);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn kill_children_reaps_and_empties_slot() {
+        let mut cmd = fake_acp_script("sleep 30");
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let slot = Arc::new(Mutex::new(Some(cmd.spawn().unwrap())));
+        kill_children(vec![slot.clone()]).await;
+        assert!(slot.lock().await.is_none());
     }
 
     #[tokio::test]

@@ -449,7 +449,7 @@ impl ServeRouter {
 
 /// `port == 0` goes through `bind_concrete_ephemeral` (reachable under WSL
 /// VirtioProxy, issue #22); an explicit port binds directly.
-async fn bind_serve_listener(host: &str, port: u16) -> Result<tokio::net::TcpListener> {
+pub(crate) async fn bind_serve_listener(host: &str, port: u16) -> Result<tokio::net::TcpListener> {
     if port == 0 {
         crate::services::http_utils::bind_concrete_ephemeral(host).await
     } else {

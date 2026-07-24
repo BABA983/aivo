@@ -166,6 +166,12 @@ impl CursorModelRouter {
     /// can stream.
     pub async fn start_background(&self) -> Result<(u16, JoinHandle<Result<()>>)> {
         let (listener, port) = bind_local_listener().await?;
+        let handle = self.start_on_listener(listener).await?;
+        Ok((port, handle))
+    }
+
+    /// Start on a caller-bound listener (`aivo serve` picks its own host/port).
+    pub async fn start_on_listener(&self, listener: TcpListener) -> Result<JoinHandle<Result<()>>> {
         let mcp_bridge = McpBridge::start_background().await?;
         let prewarm = self.config.prewarm_count;
         let mcp_prewarmed = Arc::new(Mutex::new(McpPrewarmSlot::new()));
@@ -191,8 +197,7 @@ impl CursorModelRouter {
                 id_style,
             );
         }
-        let handle = tokio::spawn(run_router(listener, state));
-        Ok((port, handle))
+        Ok(tokio::spawn(run_router(listener, state)))
     }
 }
 

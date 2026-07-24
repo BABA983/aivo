@@ -1064,6 +1064,8 @@ pub async fn run() -> ! {
     services::ollama::stop_if_we_started();
     // Stop llama-server if aivo auto-started it for a HuggingFace run.
     services::huggingface::stop_if_we_started();
+    // `process::exit` below skips `kill_on_drop`; cursor-agent ignores stdin EOF.
+    services::acp_client::kill_all_acp_children().await;
 
     // Nudge after the command (TUI screen restored) if a newer release is cached.
     if !is_update_cmd {
