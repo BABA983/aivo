@@ -564,14 +564,25 @@ impl CodeTuiApp {
         push_block(lines, bars, indent_sub_block(block), Some(SHELL()));
     }
 
+    /// The transient notice, else the live-share URL — the slot clears every
+    /// turn but the link must stay visible while sharing.
+    pub(super) fn display_notice(&self) -> Option<(Color, String)> {
+        if self.notice.is_some() {
+            return self.notice.clone();
+        }
+        let handle = self.share.handle.as_ref()?;
+        Some((LIVE(), format!("{LIVE_NOTICE_PREFIX}{}", handle.url())))
+    }
+
     fn push_notice_block(&self, lines: &mut Vec<StyledLine>, bars: &mut Vec<Option<Color>>) {
-        let Some((color, _)) = notice_display(self.notice.as_ref()) else {
+        let notice = self.display_notice();
+        let Some((color, _)) = notice_display(notice.as_ref()) else {
             return;
         };
         lines.push(blank_line());
         bars.push(None);
         let mut block = Vec::new();
-        if let Some(spans) = notice_spans(self.notice.as_ref()) {
+        if let Some(spans) = notice_spans(notice.as_ref()) {
             block.push(line_with_plain(spans));
         }
         push_block(lines, bars, indent_sub_block(block), Some(color));
@@ -1035,7 +1046,7 @@ impl CodeTuiApp {
             }
             None => 0usize.hash(&mut hasher),
         }
-        if let Some((color, text)) = notice_display(self.notice.as_ref()) {
+        if let Some((color, text)) = notice_display(self.display_notice().as_ref()) {
             text.as_ref().hash(&mut hasher);
             format!("{color:?}").hash(&mut hasher);
         }
@@ -2851,7 +2862,7 @@ impl CodeTuiApp {
     }
 
     fn notice_plain_lines(&self, width: u16) -> Vec<String> {
-        notice_display(self.notice.as_ref())
+        notice_display(self.display_notice().as_ref())
             .map(|(_, text)| {
                 let mut lines = vec![String::new()];
                 lines.extend(wrap_plain_lines(&[text.into_owned()], width));
@@ -3034,7 +3045,7 @@ impl CodeTuiApp {
         if self.loading_resume.is_none() {
             lines.extend(self.welcome_status_lines().into_iter().map(|sl| sl.line));
         }
-        if let Some(spans) = notice_spans(self.notice.as_ref()) {
+        if let Some(spans) = notice_spans(self.display_notice().as_ref()) {
             lines.push(Line::from(""));
             lines.push(Line::from(spans));
         }
