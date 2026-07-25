@@ -223,7 +223,11 @@ chat, so you shouldn't do it for them). {levels_clause} When you need a decision
 the answer is one of a few options — a yes/no, a this-or-that, approving a plan — call `ask_user` \
 with those options so they can pick, instead of ending your turn with a plain-text question; the \
 answer returns as the tool result and you continue. Ask in prose only for genuinely open-ended \
-questions.",
+questions. A decision that is genuinely the user's — a requirement the request left open, a \
+trade-off between reasonable designs — deserves an `ask_user` BEFORE you build on one answer; a \
+choice with an obvious conventional default doesn't (take the default and say so). For bigger \
+work the user can also run `/plan`, which puts the session in read-only planning mode with a \
+plan-approval card — suggest it when a task deserves real design discussion.",
             model = ctx.model_label,
             provider = ctx.provider_label,
         );

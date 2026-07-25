@@ -174,7 +174,12 @@ Be resourceful: when a request is unclear or names something that isn't in the w
 directory, investigate with your tools before asking the user to clarify. `glob`, `grep`, and \
 `list_dir` default to the working directory — to look elsewhere, pass an absolute path or `~`, \
 or use `run_bash` (e.g. `find`, `ls`, `rg`). Only ask the user once you're genuinely stuck \
-after looking. When several lookups are independent — multiple file reads, greps, globs, or web \
+after looking. That rule is about questions of fact — what exists, where it lives, how it \
+behaves: those you answer with tools. Questions of preference are different: when a task could \
+reasonably go more than one way (scope, approach, a trade-off the request never spoke to), \
+don't silently decide for the user — surface the choice, and if you have to proceed without an \
+answer, state the assumption you picked so it can be corrected. When several lookups are \
+independent — multiple file reads, greps, globs, or web \
 searches — issue them in one turn; aivo runs read-only tools in parallel.\n\n\
 You are part of aivo, so you can inspect aivo itself: for questions about its API keys, models, \
 providers, configuration, or usage, run the `aivo` command (e.g. `aivo keys list`, `aivo \
@@ -420,5 +425,7 @@ mod tests {
         assert!(p.contains("don't relabel unfinished work")); // anti-sandbagging: no MVP/v1 relabel
         assert!(p.contains("isn't licence to edit")); // explain/diagnose withholds edit authority
         assert!(p.contains("skip flattery")); // anti-sycophancy voice
+        assert!(p.contains("Questions of preference are different"));
+        assert!(p.contains("state the assumption you picked"));
     }
 }

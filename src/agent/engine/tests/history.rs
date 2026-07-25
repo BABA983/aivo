@@ -165,6 +165,10 @@ fn confirm_before_build_is_opt_in_idempotent_and_durable() {
     e.set_confirm_before_build();
     let gated = system_content(&e);
     assert!(gated.contains("before you BUILD something substantial"));
+    assert!(gated.contains("measured by decisions as much as by size"));
+    assert!(gated.contains("BEFORE settling on a plan"));
+    assert!(gated.contains("something to push back on"));
+    assert!(gated.contains("when in doubt, treat it as substantial"));
     // Carve-outs: small edits pass through, go-aheads skip, refinements re-ask.
     assert!(gated.contains("small single-file edits"));
     assert!(gated.contains("work autonomously"));

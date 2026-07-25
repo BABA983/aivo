@@ -27,6 +27,8 @@ fn chat_session_context_injects_facts_and_tools() {
     assert!(p.contains("interactive `aivo code` session"));
     assert!(p.contains("gpt-5") && p.contains("openrouter") && p.contains("high"));
     assert!(p.contains("/model") && p.contains("switch_model") && p.contains("/key"));
+    assert!(p.contains("BEFORE you build on one answer"));
+    assert!(p.contains("/plan"));
     let names = tool_names(&e);
     assert!(names.contains(&"switch_model".to_string()));
     assert!(names.contains(&"set_effort".to_string()));
