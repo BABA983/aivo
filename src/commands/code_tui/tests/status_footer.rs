@@ -667,10 +667,10 @@ fn test_status_tail_shows_turn_output_tokens() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     app.sending = true;
-    app.pending_response = "x".repeat(4_000); // ~1k tokens streamed
+    app.apply_runtime_delta(ChatResponseChunk::Content("x".repeat(4_000))); // ~1k tokens streamed
     // A live ~-flagged estimate remains visible without extra keyboard hints.
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("tokens"), "estimate shown: {plain:?}");
+    assert!(plain.contains("~1k tokens"), "estimate shown: {plain:?}");
     assert!(
         !plain.contains("esc to interrupt"),
         "interrupt hint removed from agent-turn status: {plain:?}"
@@ -678,9 +678,28 @@ fn test_status_tail_shows_turn_output_tokens() {
     // The engine reports the turn's cumulative generated tokens → exact (no ~),
     // distinct from the prompt-dominated context total (which stays in the footer).
     app.turn_output_tokens = 512;
+    app.turn_stream_chars_measured = app.turn_stream_chars;
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(plain.contains("512 tokens"), "turn output shown: {plain:?}");
     assert!(!plain.contains("~512"), "measured, not estimate: {plain:?}");
+}
+
+#[test]
+fn test_status_tail_ticks_between_round_measurements() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    // Round 1 measured 512 tokens; round 2's thinking must keep the tail moving.
+    app.turn_output_tokens = 512;
+    app.turn_stream_chars = 2_000;
+    app.turn_stream_chars_measured = 2_000;
+    app.apply_runtime_delta(ChatResponseChunk::Reasoning("y".repeat(2_000)));
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(plain.contains("~1k tokens"), "512 + ~500 shown: {plain:?}");
+    // A segment commit clears the buffers; the monotonic count must not shrink.
+    app.pending_reasoning.clear();
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(plain.contains("~1k tokens"), "estimate held: {plain:?}");
 }
 
 #[test]
@@ -1401,7 +1420,10 @@ fn test_inline_status_stays_in_transcript_across_phases() {
     assert!(!plain.contains("tokens"), "no token tail at 0: {plain:?}");
 
     // Streaming the reply reads "Working"; once output flows the tail shows it.
-    app.pending_response = "streaming the answer".to_string();
+    app.apply_runtime_delta(ChatResponseChunk::Content(
+        "streaming the answer".to_string(),
+    ));
+    app.drain_incoming_buffer();
     let plain = app.build_transcript().plain_lines.join("\n");
     assert!(plain.contains("streaming the answer"));
     assert!(plain.contains("Working"), "streaming phase: {plain:?}");

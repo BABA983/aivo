@@ -2683,6 +2683,10 @@ pub(super) struct CodeTuiApp {
     /// This turn's cumulative generated tokens (status-line tail). Reset at turn
     /// start; fed by `AgentTurnTokens` (agent) or `Usage` (plain chat).
     pub(super) turn_output_tokens: u64,
+    /// Streamed bytes this turn / at the last measured update; the gap ÷4 keeps
+    /// the status tail ticking between round-boundary measurements.
+    pub(super) turn_stream_chars: u64,
+    pub(super) turn_stream_chars_measured: u64,
     /// A connection retry is in progress → status reads "Working", not
     /// "Thinking". Set on the retry notice, cleared on progress.
     pub(super) retrying: bool,
@@ -3251,6 +3255,8 @@ impl CodeTuiApp {
             tool_output_tail: std::collections::VecDeque::new(),
             tool_output_partial: String::new(),
             turn_output_tokens: 0,
+            turn_stream_chars: 0,
+            turn_stream_chars_measured: 0,
             retrying: false,
             last_usage: None,
             live_usage: None,

@@ -418,6 +418,8 @@ impl CodeTuiApp {
         self.last_tool_action = None;
         self.subagent_rows.clear();
         self.turn_output_tokens = 0;
+        self.turn_stream_chars = 0;
+        self.turn_stream_chars_measured = 0;
         self.retrying = false;
         // Fresh stall clock — a stale stamp would flag a "stall" at turn start.
         self.last_stream_activity = Some(Instant::now());
@@ -1145,6 +1147,9 @@ impl CodeTuiApp {
         self.sending = true;
         self.turn_model = (!self.raw_model.is_empty()).then(|| self.raw_model.clone());
         self.request_started_at = Some(Instant::now());
+        self.turn_output_tokens = 0;
+        self.turn_stream_chars = 0;
+        self.turn_stream_chars_measured = 0;
         self.compact_before = Some(before);
         self.response_task = Some(tokio::spawn(async move {
             let client = crate::services::http_utils::router_http_client();

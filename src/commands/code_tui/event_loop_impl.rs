@@ -65,6 +65,7 @@ impl CodeTuiApp {
             }
             RuntimeEvent::AgentTurnTokens(output) => {
                 self.turn_output_tokens = output;
+                self.turn_stream_chars_measured = self.turn_stream_chars;
             }
             RuntimeEvent::AgentToolCall {
                 id,
@@ -1068,7 +1069,7 @@ impl CodeTuiApp {
         .await;
     }
 
-    fn apply_runtime_delta(&mut self, delta: ChatResponseChunk) {
+    pub(super) fn apply_runtime_delta(&mut self, delta: ChatResponseChunk) {
         // Any chunk is progress — a prior connection retry has recovered.
         self.retrying = false;
         self.clear_retry_notice();
@@ -1083,6 +1084,7 @@ impl CodeTuiApp {
                     self.reasoning_elapsed_ms = self.segment_reasoning_ms();
                 }
                 self.clear_sandbox_escalation_notice();
+                self.turn_stream_chars += text.len() as u64;
                 self.incoming_buffer.push_str(&text);
             }
             // Live provider-measured usage — the footer's context-fill reads this
@@ -1090,6 +1092,7 @@ impl CodeTuiApp {
             ChatResponseChunk::Usage(usage) => {
                 // Plain chat is a single round, so its completion IS the turn output.
                 self.turn_output_tokens = usage.completion_tokens;
+                self.turn_stream_chars_measured = self.turn_stream_chars;
                 self.live_usage = Some(usage);
             }
             // Accumulate the model's reasoning unconditionally; `thinking_enabled`
@@ -1100,6 +1103,7 @@ impl CodeTuiApp {
                 if self.reasoning_started_at.is_none() {
                     self.reasoning_started_at = Some(Instant::now());
                 }
+                self.turn_stream_chars += text.len() as u64;
                 self.pending_reasoning.push_str(&text);
             }
         }

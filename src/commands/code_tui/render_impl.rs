@@ -615,16 +615,15 @@ impl CodeTuiApp {
         // Tokens (measured, else ~chars/4; 0 omitted) · queued count.
         let tail = if self.sending {
             let mut parts: Vec<String> = Vec::new();
-            let (used, is_estimate) = if self.turn_output_tokens > 0 {
-                (self.turn_output_tokens, false)
-            } else {
-                let streamed = self.pending_response.len()
-                    + self.incoming_buffer.len()
-                    + self.pending_reasoning.len();
-                (streamed as u64 / 4, true)
-            };
+            // Measured rounds + chars/4 of the stream since, so the count keeps
+            // ticking through a long thought.
+            let unmeasured = self
+                .turn_stream_chars
+                .saturating_sub(self.turn_stream_chars_measured)
+                / 4;
+            let used = self.turn_output_tokens + unmeasured;
             if used > 0 {
-                let approx = if is_estimate { "~" } else { "" };
+                let approx = if unmeasured > 0 { "~" } else { "" };
                 parts.push(format!("{approx}{} tokens", format_token_count_value(used)));
             }
             let queued = self.queued_input_count();
