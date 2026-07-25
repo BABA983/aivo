@@ -367,11 +367,11 @@ fn test_click_thinking_header_toggles_inline_expansion() {
     // Simulate the rendered rows: each assistant turn is an answer line preceded
     // by its full-thought `✻` header, in display (top→bottom) order.
     let hitbox = |rows: Vec<&str>| {
-        Some(TranscriptHitbox {
-            area: Rect::new(0, 0, 40, 10),
-            first_row: 0,
-            rows: rows.into_iter().map(str::to_string).collect(),
-        })
+        Some(TranscriptHitbox::from_rows(
+            Rect::new(0, 0, 40, 10),
+            0,
+            rows.into_iter().map(str::to_string).collect(),
+        ))
     };
     app.transcript_hitbox = hitbox(vec![
         "✻ FIRST cot",

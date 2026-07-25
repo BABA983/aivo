@@ -117,12 +117,12 @@ fn output_block_expands_inline_on_click() {
     let refresh = |app: &mut CodeTuiApp| -> Vec<String> {
         let body = app.build_transcript_history_body(80);
         let wrapped = wrap_transcript(&body.lines, &body.bar_colors, 80);
-        app.transcript_hitbox = Some(TranscriptHitbox {
-            area: Rect::new(0, 0, 80, 40),
-            first_row: 0,
-            rows: wrapped.rows.clone(),
-        });
-        wrapped.rows
+        app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+            Rect::new(0, 0, 80, 40),
+            0,
+            wrapped.rows.to_vec(),
+        ));
+        wrapped.rows.to_vec()
     };
 
     // Folded: the preview stops at the cap, the tail (L0250) is hidden behind a
@@ -494,12 +494,12 @@ fn test_parallel_mcp_batch_interleaves_call_and_result() {
     let refresh = |app: &mut CodeTuiApp| -> Vec<String> {
         let body = app.build_transcript_history_body(80);
         let wrapped = wrap_transcript(&body.lines, &body.bar_colors, 80);
-        app.transcript_hitbox = Some(TranscriptHitbox {
-            area: Rect::new(0, 0, 80, 40),
-            first_row: 0,
-            rows: wrapped.rows.clone(),
-        });
-        wrapped.rows
+        app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+            Rect::new(0, 0, 80, 40),
+            0,
+            wrapped.rows.to_vec(),
+        ));
+        wrapped.rows.to_vec()
     };
     let rows = refresh(&mut app);
 
@@ -952,12 +952,12 @@ fn expanded_tool_result_refolds_from_its_summary_row() {
     let refresh = |app: &mut CodeTuiApp| -> Vec<String> {
         let body = app.build_transcript_history_body(80);
         let wrapped = wrap_transcript(&body.lines, &body.bar_colors, 80);
-        app.transcript_hitbox = Some(TranscriptHitbox {
-            area: Rect::new(0, 0, 80, 40),
-            first_row: 0,
-            rows: wrapped.rows.clone(),
-        });
-        wrapped.rows
+        app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+            Rect::new(0, 0, 80, 40),
+            0,
+            wrapped.rows.to_vec(),
+        ));
+        wrapped.rows.to_vec()
     };
 
     let rows = refresh(&mut app);
@@ -1014,11 +1014,11 @@ fn tool_result_expander_click_maps_across_mixed_blocks() {
 
     let body = app.build_transcript_history_body(80);
     let wrapped = wrap_transcript(&body.lines, &body.bar_colors, 80);
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 80, 40),
-        first_row: 0,
-        rows: wrapped.rows.clone(),
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 80, 40),
+        0,
+        wrapped.rows.to_vec(),
+    ));
     let marker_rows: Vec<usize> = wrapped
         .rows
         .iter()

@@ -174,11 +174,15 @@ fn styled_line_from_chars(chars: &[(char, Style)]) -> StyledLine {
     }
 }
 
-/// A transcript wrapped to the render width: the `Text` (rendered with wrap OFF),
-/// the per-row plain strings (for selection), and per-row bar colors (the gutter).
+/// A transcript wrapped to the render width: the `Text` (rendered with wrap OFF)
+/// and the per-row plain strings, `Arc`-shared so the per-frame hitbox can
+/// publish the row model without cloning every row.
 pub(super) struct WrappedTranscript {
     pub(super) text: Text<'static>,
-    pub(super) rows: Vec<String>,
+    pub(super) rows: std::sync::Arc<Vec<String>>,
+    /// Per-row bar colors; unpainted live (bars are export-only), kept so the
+    /// wrap keeps carrying them per row.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) bars: Vec<Option<Color>>,
 }
 
@@ -209,7 +213,7 @@ pub(super) fn wrap_transcript(
     }
     WrappedTranscript {
         text: Text::from(text_lines),
-        rows,
+        rows: std::sync::Arc::new(rows),
         bars: row_bars,
     }
 }
@@ -758,9 +762,38 @@ pub(super) fn render_reasoning_full(lines: &mut Vec<StyledLine>, reasoning: &str
 }
 
 /// The most recent [`THINKING_WINDOW_LINES`] rows (the default/live view).
+/// Only the last window's worth of source lines can reach it (each yields ≥1
+/// row), so only that tail is wrapped — O(window) per reasoning delta.
 pub(super) fn render_reasoning_window(lines: &mut Vec<StyledLine>, reasoning: &str, width: u16) {
-    let rows = wrapped_reasoning_rows(reasoning, width);
-    let marker = thinking_marker(rows.len() > THINKING_WINDOW_LINES, false);
+    let mut total_lines = 0usize;
+    let mut tail: std::collections::VecDeque<&str> =
+        std::collections::VecDeque::with_capacity(THINKING_WINDOW_LINES);
+    for raw_line in reasoning.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        total_lines += 1;
+        if tail.len() == THINKING_WINDOW_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(trimmed);
+    }
+    let wrap_w = usize::from(width).saturating_sub(2);
+    let rows: Vec<String> = if wrap_w < 2 {
+        // width 0 before the first frame; the paint-time wrapper sizes them
+        tail.iter().map(|line| line.to_string()).collect()
+    } else {
+        tail.iter()
+            .flat_map(|line| {
+                wrap_styled_line(&[Span::raw(line.to_string())], wrap_w)
+                    .into_iter()
+                    .map(|sl| sl.plain)
+            })
+            .collect()
+    };
+    let windowed = total_lines > THINKING_WINDOW_LINES || rows.len() > THINKING_WINDOW_LINES;
+    let marker = thinking_marker(windowed, false);
     let start = rows.len().saturating_sub(THINKING_WINDOW_LINES);
     render_reasoning_rows(lines, &rows[start..], marker);
 }
@@ -814,11 +847,22 @@ fn mark_block(
     marker: &'static str,
     marker_style: Style,
 ) -> Vec<StyledLine> {
+    mark_block_from(block, body_width, marker, marker_style, false).0
+}
+
+/// [`mark_block`] with an explicit starting `marked` state, returned updated —
+/// settled/live reply parts place exactly one marker across the sequence.
+fn mark_block_from(
+    block: Vec<StyledLine>,
+    body_width: u16,
+    marker: &'static str,
+    marker_style: Style,
+    mut marked: bool,
+) -> (Vec<StyledLine>, bool) {
     let indent = " ".repeat(usize::from(row_display_width(marker)));
     // width 0 before the first frame → skip wrapping; the paint-time wrapper sizes them.
     let wrap_w = usize::from(body_width);
     let mut out = Vec::new();
-    let mut marked = false;
     for sl in block {
         let rows = if wrap_w >= 2 {
             wrap_styled_line(&sl.line.spans, wrap_w)
@@ -846,7 +890,64 @@ fn mark_block(
             });
         }
     }
-    out
+    (out, marked)
+}
+
+/// Renders one part of a streamed reply (settled chunk or live suffix) so the
+/// concatenated parts are byte-identical to a single-pass
+/// [`push_assistant_blocks`]. Junctions mirror `MarkdownRenderer`: `settled`
+/// skips `finish`'s artifact blank, `first` strips the doc-leading blank, and
+/// `prev_ends_blank` reproduces `flush_line`'s consecutive-blank dedupe.
+pub(super) fn render_reply_part(
+    content: &str,
+    width: u16,
+    marked: bool,
+    first: bool,
+    settled: bool,
+    prev_ends_blank: bool,
+) -> (Vec<StyledLine>, bool) {
+    let body_width = width.saturating_sub(TURN_MARKER_W);
+    let mut block = render_markdown_lines_part(content, body_width, settled);
+    if first {
+        while block
+            .first()
+            .is_some_and(|line| line.plain.trim().is_empty())
+        {
+            block.remove(0);
+        }
+    } else if prev_ends_blank
+        && block
+            .first()
+            .is_some_and(|line| line.plain.trim().is_empty())
+    {
+        block.remove(0);
+    }
+    mark_block_from(
+        block,
+        body_width,
+        crate::style::AGENT_MARKER,
+        Style::default().fg(ACCENT()),
+        marked,
+    )
+}
+
+/// [`render_markdown_lines`], but with `settled` ends in the renderer's true
+/// mid-stream state so the next part continues seamlessly.
+fn render_markdown_lines_part(content: &str, width: u16, settled: bool) -> Vec<StyledLine> {
+    let mut options = MdOptions::empty();
+    options.insert(MdOptions::ENABLE_STRIKETHROUGH);
+    options.insert(MdOptions::ENABLE_TABLES);
+    options.insert(MdOptions::ENABLE_TASKLISTS);
+    let parser = Parser::new_ext(content, options);
+    let mut renderer = MarkdownRenderer::new(width);
+    for event in parser {
+        renderer.push_event(event);
+    }
+    if settled {
+        renderer.finish_stream()
+    } else {
+        renderer.finish()
+    }
 }
 
 /// Push an assistant turn as up to two blocks: the thinking block is barless so it
@@ -3181,6 +3282,13 @@ impl MarkdownRenderer {
 
     fn finish(mut self) -> Vec<StyledLine> {
         self.flush_line();
+        self.lines
+    }
+
+    /// [`finish`] minus its paragraph-break blank: the true stream state, so a
+    /// settled prefix ends exactly where the next part picks up.
+    fn finish_stream(mut self) -> Vec<StyledLine> {
+        self.flush_pending();
         self.lines
     }
 

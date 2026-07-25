@@ -269,7 +269,7 @@ fn test_local_command_long_line_wraps_in_full() {
     let wrapped = wrap_transcript(&body.lines, &body.bar_colors, width);
 
     // No row overflows the width (so ratatui's wrap-OFF render can't clip)…
-    for row in &wrapped.rows {
+    for row in wrapped.rows.iter() {
         assert!(
             row_display_width(row) <= width,
             "row exceeds width: {row:?}"

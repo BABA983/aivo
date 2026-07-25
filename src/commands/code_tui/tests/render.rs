@@ -599,13 +599,19 @@ fn test_streaming_composed_render_matches_full_transcript() {
             app.render_main(frame, frame.area());
         })
         .unwrap();
-    let composed: Vec<String> = app.transcript_hitbox.as_ref().unwrap().rows.clone();
+    let composed: Vec<String> = app
+        .transcript_hitbox
+        .as_ref()
+        .unwrap()
+        .rows()
+        .map(str::to_string)
+        .collect();
 
     // Reference: the single-pass transcript wrapped to the same width.
     let full = app.build_transcript();
     let wrapped = wrap_transcript(&full.lines, &full.bar_colors, app.transcript_width);
     assert_eq!(
-        composed, wrapped.rows,
+        composed, *wrapped.rows,
         "split render diverged from the single-pass build_transcript"
     );
 }
@@ -648,11 +654,17 @@ fn streaming_reply_cache_invalidates_on_change() {
                 app.render_main(frame, frame.area());
             })
             .unwrap();
-        let composed: Vec<String> = app.transcript_hitbox.as_ref().unwrap().rows.clone();
+        let composed: Vec<String> = app
+            .transcript_hitbox
+            .as_ref()
+            .unwrap()
+            .rows()
+            .map(str::to_string)
+            .collect();
         let full = app.build_transcript();
         let wrapped = wrap_transcript(&full.lines, &full.bar_colors, app.transcript_width);
         assert_eq!(
-            composed, wrapped.rows,
+            composed, *wrapped.rows,
             "cached render diverged from build_transcript at reply {reply:?} notice {notice:?}"
         );
     }
@@ -690,7 +702,7 @@ fn test_wrap_transcript_fills_background_to_full_width() {
     }];
     let wrapped = wrap_transcript(&diff, &[None], 12);
     assert!(wrapped.rows.len() >= 2, "long diff line should wrap");
-    for row in &wrapped.rows {
+    for row in wrapped.rows.iter() {
         assert_eq!(
             row_display_width(row),
             12,

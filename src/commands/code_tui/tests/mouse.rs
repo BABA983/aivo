@@ -130,11 +130,11 @@ async fn test_mouse_wheel_scrolls_only_inside_transcript_hitbox() {
     });
     app.transcript_width = 80;
     app.transcript_view_height = 6;
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 80, 6),
-        first_row: 0,
-        rows: wrap_plain_lines(&app.build_transcript().plain_lines, 80),
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 80, 6),
+        0,
+        wrap_plain_lines(&app.build_transcript().plain_lines, 80),
+    ));
     app.follow_output = false;
     app.scroll_speed = 4;
 
@@ -324,11 +324,11 @@ async fn test_mouse_drag_coordinates_map_to_transcript_rows() {
         reasoning_content: None,
         attachments: vec![],
     });
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(4, 2, 20, 4),
-        first_row: 10,
-        rows: vec!["a".to_string(); 20],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(4, 2, 20, 4),
+        10,
+        vec!["a".to_string(); 20],
+    ));
 
     app.handle_mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Left),
@@ -361,11 +361,11 @@ async fn test_screen_drag_selects_off_transcript_from_screen_capture() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     // A press below the transcript (composer/footer band) selects the screen capture.
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 20, 1),
-        first_row: 0,
-        rows: vec!["transcript".to_string()],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 20, 1),
+        0,
+        vec!["transcript".to_string()],
+    ));
     app.screen_surface = Some(ScreenSurface {
         area: Rect::new(0, 0, 20, 4),
         rows: vec![
@@ -413,11 +413,11 @@ async fn test_open_overlay_left_drag_selects_overlay_text() {
     let mut app = make_test_app(tx, rx);
     // An open overlay covers the transcript: a left drag selects the overlay text.
     app.overlay = Overlay::Help { scroll: 0 };
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 40, 10),
-        first_row: 0,
-        rows: vec!["hidden transcript".to_string(); 10],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 40, 10),
+        0,
+        vec!["hidden transcript".to_string(); 10],
+    ));
     app.screen_surface = Some(ScreenSurface {
         area: Rect::new(0, 0, 40, 4),
         rows: vec![
@@ -633,11 +633,11 @@ fn test_register_click_resets_after_interval() {
 fn test_select_word_and_line_set_expected_bounds() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 20, 3),
-        first_row: 0,
-        rows: vec!["alpha beta".to_string(), "x".to_string()],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 20, 3),
+        0,
+        vec!["alpha beta".to_string(), "x".to_string()],
+    ));
 
     assert!(app.select_word_on(
         SelectionSurface::Transcript,
@@ -692,11 +692,11 @@ async fn test_drag_to_bottom_edge_arms_and_advances_autoscroll() {
     app.transcript_view_height = 4;
     app.transcript_scroll = 0;
     app.follow_output = false;
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 20, 4),
-        first_row: 0,
-        rows: vec!["row".to_string(); 60],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 20, 4),
+        0,
+        vec!["row".to_string(); 60],
+    ));
     app.transcript_selection = Some(TranscriptSelection {
         anchor: TranscriptPoint { row: 0, column: 0 },
         focus: TranscriptPoint { row: 0, column: 0 },
@@ -747,11 +747,11 @@ async fn test_drag_to_top_edge_arms_and_advances_autoscroll() {
     app.follow_output = false;
     // The transcript is flush with the top of the screen (area.y == 0), so the
     // pointer can never sit *above* it — scroll-up must arm on the top row.
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 20, 4),
-        first_row: 5,
-        rows: vec!["row".to_string(); 60],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 20, 4),
+        5,
+        vec!["row".to_string(); 60],
+    ));
     app.transcript_selection = Some(TranscriptSelection {
         anchor: TranscriptPoint { row: 8, column: 0 },
         focus: TranscriptPoint { row: 8, column: 0 },
@@ -782,11 +782,11 @@ async fn test_drag_to_top_edge_arms_and_advances_autoscroll() {
 async fn test_drag_inside_viewport_disarms_autoscroll() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
-    app.transcript_hitbox = Some(TranscriptHitbox {
-        area: Rect::new(0, 0, 20, 4),
-        first_row: 0,
-        rows: vec!["row".to_string(); 40],
-    });
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 20, 4),
+        0,
+        vec!["row".to_string(); 40],
+    ));
     app.drag_autoscroll = Some(DragAutoscroll { dir: 1, column: 2 });
 
     // A drag back inside the viewport clears the arming.

@@ -2290,13 +2290,16 @@ impl CodeTuiApp {
         count
     }
 
-    /// The selectable rows backing `surface`.
-    fn surface_rows(&self, surface: SelectionSurface) -> Option<&[String]> {
+    /// The selectable row at `row` on `surface`.
+    fn surface_row(&self, surface: SelectionSurface, row: usize) -> Option<&str> {
         match surface {
-            SelectionSurface::Transcript => {
-                self.transcript_hitbox.as_ref().map(|h| h.rows.as_slice())
-            }
-            SelectionSurface::Screen => self.screen_surface.as_ref().map(|s| s.rows.as_slice()),
+            SelectionSurface::Transcript => self.transcript_hitbox.as_ref()?.row(row),
+            SelectionSurface::Screen => self
+                .screen_surface
+                .as_ref()?
+                .rows
+                .get(row)
+                .map(String::as_str),
         }
     }
 
@@ -2321,8 +2324,7 @@ impl CodeTuiApp {
         point: TranscriptPoint,
     ) -> bool {
         let Some((start, end)) = self
-            .surface_rows(surface)
-            .and_then(|rows| rows.get(point.row))
+            .surface_row(surface, point.row)
             .and_then(|row| word_bounds_at(row, point.column))
         else {
             return false;
@@ -2351,8 +2353,7 @@ impl CodeTuiApp {
         point: TranscriptPoint,
     ) -> bool {
         let width = self
-            .surface_rows(surface)
-            .and_then(|rows| rows.get(point.row))
+            .surface_row(surface, point.row)
             .map(|row| row_display_width(row.trim_end()))
             .unwrap_or(0);
         if width == 0 {
@@ -2502,7 +2503,7 @@ impl CodeTuiApp {
         let row_count = self
             .transcript_hitbox
             .as_ref()
-            .map(|hitbox| hitbox.rows.len())
+            .map(|hitbox| hitbox.rows_len())
             .unwrap_or(0);
         let view_height = usize::from(self.transcript_view_height);
         let focus_row = if auto.dir < 0 {
@@ -2717,11 +2718,12 @@ impl CodeTuiApp {
             let Some(hitbox) = self.transcript_hitbox.as_ref() else {
                 return false;
             };
-            if !hitbox.rows.get(row).is_some_and(|r| is_output_expander(r)) {
+            if !hitbox.row(row).is_some_and(is_output_expander) {
                 return false;
             }
-            hitbox.rows[..=row]
-                .iter()
+            hitbox
+                .rows()
+                .take(row + 1)
                 .filter(|r| is_output_expander(r))
                 .count()
         };
@@ -2747,11 +2749,12 @@ impl CodeTuiApp {
             let Some(hitbox) = self.transcript_hitbox.as_ref() else {
                 return false;
             };
-            if !hitbox.rows.get(row).is_some_and(|r| is_thinking_header(r)) {
+            if !hitbox.row(row).is_some_and(is_thinking_header) {
                 return false;
             }
-            hitbox.rows[..=row]
-                .iter()
+            hitbox
+                .rows()
+                .take(row + 1)
                 .filter(|r| is_thinking_header(r))
                 .count()
         };

@@ -7,6 +7,97 @@ fn table_layout_width(area_width: u16) -> u16 {
     area_width.saturating_sub(ACCENT_GUTTER_WIDTH + TRANSCRIPT_RIGHT_MARGIN)
 }
 
+/// True when a line can't merge backward across the blank line before it —
+/// indented continuations and list items (loose lists span blanks) can.
+fn is_safe_block_start(line: &str) -> bool {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return false;
+    }
+    if matches!(line, "-" | "*" | "+")
+        || line.starts_with("- ")
+        || line.starts_with("* ")
+        || line.starts_with("+ ")
+    {
+        return false;
+    }
+    let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0
+        && matches!(line[digits..].chars().next(), Some('.') | Some(')'))
+        && matches!(line[digits + 1..].chars().next(), Some(' ') | None)
+    {
+        return false;
+    }
+    true
+}
+
+/// Largest markdown-safe settle boundary in `src` at or after `from` (itself a
+/// boundary): the start of a non-blank [`is_safe_block_start`] line after a
+/// blank line, outside code fences and blank-spanning raw-HTML blocks. The
+/// candidate line itself stays live, so the suffix always has content.
+fn settled_reply_boundary(src: &str, from: usize) -> usize {
+    let mut best = from;
+    let mut fence: Option<(char, usize)> = None;
+    let mut html_close: Option<&'static str> = None;
+    let mut prev_blank = false;
+    let mut pos = from;
+    for line in src[from..].split_inclusive('\n') {
+        // Never judge the unterminated live edge: "2" may grow into "2. item"
+        // and continue a loose list, invalidating a latched boundary.
+        if !line.ends_with('\n') {
+            break;
+        }
+        let content = line.trim_end_matches(['\n', '\r']);
+        let trimmed = content.trim();
+        if let Some(closer) = html_close {
+            if content.contains(closer) {
+                html_close = None;
+            }
+            prev_blank = trimmed.is_empty();
+            pos += line.len();
+            continue;
+        }
+        let fence_len = trimmed
+            .chars()
+            .take_while(|&c| c == '`' || c == '~')
+            .count();
+        match fence {
+            Some((ch, len)) => {
+                // Closing fence: same char, at least as long, nothing after.
+                if fence_len >= len && trimmed.chars().all(|c| c == ch) {
+                    fence = None;
+                }
+            }
+            None => {
+                if prev_blank && !trimmed.is_empty() && is_safe_block_start(content) {
+                    best = pos;
+                }
+                if fence_len >= 3 {
+                    let ch = trimmed.chars().next().unwrap();
+                    if trimmed[..fence_len].chars().all(|c| c == ch) {
+                        fence = Some((ch, fence_len));
+                    }
+                } else {
+                    let lower = trimmed.to_ascii_lowercase();
+                    for (open, close) in [
+                        ("<pre", "</pre>"),
+                        ("<script", "</script>"),
+                        ("<style", "</style>"),
+                        ("<!--", "-->"),
+                    ] {
+                        if lower.starts_with(open) && !lower.contains(close) {
+                            html_close = Some(close);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        prev_blank = trimmed.is_empty();
+        pos += line.len();
+    }
+    best
+}
+
 /// Replace every control-char cell (tab, ESC, …) with a space, keeping its
 /// style — a raw `\t` (unicode-width 1) desyncs the terminal's cell grid. Run on
 /// the finished frame so no widget can poison the grid, whatever its source.
@@ -444,43 +535,46 @@ impl CodeTuiApp {
                 true,
             );
         }
-        // A running `!cmd` streams its output here (not into history) so the
-        // memoized history body stays put while lines arrive; it's committed to
-        // history once it finishes.
-        if let Some(run) = &self.local_command {
-            lines.push(blank_line());
-            bars.push(None);
-            let mut block = Vec::new();
-            // Serialize only a bounded preview (+ the true total) rather than the
-            // whole streamed buffer: a long-running command can accumulate megabytes,
-            // and this runs every frame. Only the first MAX_OUTPUT_LINES ever show.
-            let total = run.stdout.lines().count() + run.stderr.lines().count();
-            let content = serde_json::json!({
-                "command": run.command,
-                "stdout": first_lines(&run.stdout, MAX_PERSISTED_OUTPUT_LINES),
-                "stderr": first_lines(&run.stderr, MAX_PERSISTED_OUTPUT_LINES),
-                "total_lines": total,
-                "running": true,
-            })
-            .to_string();
-            render_local_command(&mut block, &content, OutputView::Live);
-            push_block(
-                &mut lines,
-                &mut bars,
-                indent_sub_block(block),
-                Some(SHELL()),
-            );
-        }
-        if let Some((color, _)) = notice_display(self.notice.as_ref()) {
-            lines.push(blank_line());
-            bars.push(None);
-            let mut block = Vec::new();
-            if let Some(spans) = notice_spans(self.notice.as_ref()) {
-                block.push(line_with_plain(spans));
-            }
-            push_block(&mut lines, &mut bars, indent_sub_block(block), Some(color));
-        }
+        self.push_live_command_block(&mut lines, &mut bars);
+        self.push_notice_block(&mut lines, &mut bars);
         (lines, bars)
+    }
+
+    /// A running `!cmd`'s live preview. Streams here (not into history) so the
+    /// memoized body stays put; committed to history once it finishes. Bounded
+    /// preview only — this runs per content change and a long command can
+    /// buffer megabytes; only the first MAX_OUTPUT_LINES ever show.
+    fn push_live_command_block(&self, lines: &mut Vec<StyledLine>, bars: &mut Vec<Option<Color>>) {
+        let Some(run) = &self.local_command else {
+            return;
+        };
+        lines.push(blank_line());
+        bars.push(None);
+        let total = run.stdout.lines().count() + run.stderr.lines().count();
+        let content = serde_json::json!({
+            "command": run.command,
+            "stdout": first_lines(&run.stdout, MAX_PERSISTED_OUTPUT_LINES),
+            "stderr": first_lines(&run.stderr, MAX_PERSISTED_OUTPUT_LINES),
+            "total_lines": total,
+            "running": true,
+        })
+        .to_string();
+        let mut block = Vec::new();
+        render_local_command(&mut block, &content, OutputView::Live);
+        push_block(lines, bars, indent_sub_block(block), Some(SHELL()));
+    }
+
+    fn push_notice_block(&self, lines: &mut Vec<StyledLine>, bars: &mut Vec<Option<Color>>) {
+        let Some((color, _)) = notice_display(self.notice.as_ref()) else {
+            return;
+        };
+        lines.push(blank_line());
+        bars.push(None);
+        let mut block = Vec::new();
+        if let Some(spans) = notice_spans(self.notice.as_ref()) {
+            block.push(line_with_plain(spans));
+        }
+        push_block(lines, bars, indent_sub_block(block), Some(color));
     }
 
     /// Pairs each `tool_call` in a *mixed* parallel batch with its result:
@@ -919,20 +1013,18 @@ impl CodeTuiApp {
         cache.wrapped = Some(wrapped);
     }
 
-    /// Cheap O(1) fingerprint of the volatile tail's inputs — the streamed reply,
-    /// a running `!cmd`'s buffered output, and any notice. All grow append-only
-    /// (or are short), so byte lengths + the notice identify the rendered tail
-    /// without hashing it. The spinner is deliberately EXCLUDED (it animates every
-    /// frame and is wrapped fresh at compose time), so a pure animation tick — the
-    /// 60fps redraw that drove the O(reply²) re-parse — hits the cache.
+    /// Cheap O(1) fingerprint of every volatile-tail input EXCEPT the streamed
+    /// reply's length — the reply is handled by the settled/live split, so a
+    /// streamed token re-renders only the live remainder while any change here
+    /// resets all sections. The spinner is excluded (wrapped fresh per frame),
+    /// so a pure animation tick hits the cache.
     pub(super) fn volatile_tail_fp(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.is_transcript_empty().hash(&mut hasher);
-        self.pending_response.len().hash(&mut hasher);
-        // `pending_reasoning.len()` keys the live thinking summary's line-count
-        // fallback; `thinking_enabled` gates whether it renders, so a /config
-        // toggle mid-turn must invalidate too.
+        // The empty↔non-empty flip changes the head's shape; growth is NOT hashed.
+        self.pending_response.is_empty().hash(&mut hasher);
+        // A /config thinking toggle mid-turn must invalidate too.
         self.pending_reasoning.len().hash(&mut hasher);
         self.thinking_enabled.hash(&mut hasher);
         match &self.local_command {
@@ -950,140 +1042,224 @@ impl CodeTuiApp {
         hasher.finish()
     }
 
-    /// Renders the volatile tail (markdown → styled lines) only when its
-    /// fingerprint or the render width changed — not on every animation frame or
-    /// every streamed token of an unchanged reply. The expensive markdown parse +
-    /// table layout (the O(reply) cost the spinner redraw used to repeat every
-    /// frame) happen here, at most once per *content* change.
-    fn ensure_volatile_tail(&mut self, render_width: u16) {
-        let fp = self.volatile_tail_fp();
-        let fresh = self
-            .render_cache
-            .volatile_tail
-            .as_ref()
-            .is_some_and(|cache| cache.fp == fp && cache.render_width == render_width);
-        if fresh {
-            return;
+    /// The tail lines BEFORE the streamed reply's content: the outer spacing
+    /// blank and the live reasoning window. Mirrors `volatile_tail_blocks`.
+    fn build_tail_head(&self, width: u16) -> TailSection {
+        let substantive =
+            self.thinking_enabled && reasoning_is_substantive(&self.pending_reasoning);
+        let answer_started = !self.pending_response.is_empty();
+        if self.is_transcript_empty() || (!substantive && !answer_started) {
+            return TailSection::empty();
         }
-        let (lines, bars) = self.volatile_tail_blocks(render_width);
-        self.render_cache.volatile_tail = Some(VolatileTailCache {
-            fp,
-            render_width,
-            lines,
-            bars,
-            plain_width: 0,
-            prepass: 0,
-            styled_width: 0,
-            wrapped: None,
-        });
+        let mut lines: Vec<StyledLine> = vec![blank_line()];
+        let mut bars: Vec<Option<Color>> = vec![None];
+        if substantive {
+            let mut block = Vec::new();
+            render_reasoning_window(
+                &mut block,
+                &self.pending_reasoning,
+                width.saturating_sub(SUB_BLOCK_INDENT),
+            );
+            push_block(&mut lines, &mut bars, indent_sub_block(block), None);
+            if answer_started {
+                lines.push(blank_line());
+                bars.push(None);
+            }
+        }
+        TailSection::new(lines, bars)
     }
 
-    /// Char-wrapped row count of the cached tail at `plain_width`, for the pane-
-    /// height prepass — memoized on the width so a streamed reply isn't re-counted
-    /// every frame. Must run after [`ensure_volatile_tail`].
+    /// The live remainder of the tail: the reply suffix past the settled
+    /// boundary, then the `!cmd` preview and notice. Mirrors `volatile_tail_blocks`.
+    fn build_tail_live(
+        &self,
+        width: u16,
+        settled_src: usize,
+        settled_marked: bool,
+        prev_ends_blank: bool,
+    ) -> TailSection {
+        let mut lines: Vec<StyledLine> = Vec::new();
+        let mut bars: Vec<Option<Color>> = Vec::new();
+        if self.is_transcript_empty() {
+            return TailSection::empty();
+        }
+        if !self.pending_response.is_empty() {
+            let (part, _) = render_reply_part(
+                &self.pending_response[settled_src..],
+                width,
+                settled_marked,
+                settled_src == 0,
+                false,
+                prev_ends_blank,
+            );
+            // `push_block`'s trailing-blank trim is correct here — this is the
+            // reply's true end; settled chunks keep theirs (interior).
+            push_block(&mut lines, &mut bars, part, Some(ACCENT()));
+        }
+        self.push_live_command_block(&mut lines, &mut bars);
+        self.push_notice_block(&mut lines, &mut bars);
+        TailSection::new(lines, bars)
+    }
+
+    /// Renders the volatile tail incrementally: a non-reply input (or width)
+    /// change resets all sections; a grown reply renders only the newly settled
+    /// chunk and the live suffix; an unchanged tail returns untouched.
+    fn ensure_volatile_tail(&mut self, render_width: u16) {
+        let fp = self.volatile_tail_fp();
+        let reply_len = self.pending_response.len();
+        if let Some(cache) = self.render_cache.volatile_tail.as_ref()
+            && cache.fp == fp
+            && cache.render_width == render_width
+            && reply_len >= cache.reply_len
+        {
+            if reply_len == cache.reply_len {
+                return;
+            }
+        } else {
+            let head = self.build_tail_head(render_width);
+            self.render_cache.volatile_tail = Some(VolatileTailCache {
+                fp,
+                render_width,
+                reply_len: 0,
+                settled_src: 0,
+                settled_marked: false,
+                head,
+                settled: Vec::new(),
+                live: TailSection::empty(),
+                plain_width: 0,
+                styled_width: 0,
+            });
+        }
+        let ends_blank = |section: &TailSection| {
+            section
+                .lines
+                .last()
+                .is_some_and(|l| l.plain.trim().is_empty())
+        };
+        let (settled_src, settled_marked, prev_ends_blank) = {
+            let cache = self.render_cache.volatile_tail.as_ref().unwrap();
+            (
+                cache.settled_src,
+                cache.settled_marked,
+                cache.settled.last().is_some_and(&ends_blank),
+            )
+        };
+        let boundary = settled_reply_boundary(&self.pending_response, settled_src);
+        let advanced = (boundary > settled_src).then(|| {
+            let (chunk, marked) = render_reply_part(
+                &self.pending_response[settled_src..boundary],
+                render_width,
+                settled_marked,
+                settled_src == 0,
+                true,
+                prev_ends_blank,
+            );
+            // No trailing trim: the chunk's separator blank is interior.
+            let chunk_bars = vec![Some(ACCENT()); chunk.len()];
+            (TailSection::new(chunk, chunk_bars), marked)
+        });
+        let (new_marked, live_prev_blank) = match &advanced {
+            Some((section, marked)) => (*marked, ends_blank(section)),
+            None => (settled_marked, prev_ends_blank),
+        };
+        let live = self.build_tail_live(render_width, boundary, new_marked, live_prev_blank);
+        let cache = self.render_cache.volatile_tail.as_mut().unwrap();
+        if let Some((section, marked)) = advanced {
+            cache.settled.push(section);
+            cache.settled_src = boundary;
+            cache.settled_marked = marked;
+        }
+        cache.live = live;
+        cache.reply_len = reply_len;
+    }
+
+    /// Char-wrapped row count of the tail at `plain_width` for the pane-height
+    /// prepass, memoized per section. Must run after [`ensure_volatile_tail`].
     fn volatile_tail_prepass(&mut self, plain_width: u16) -> usize {
         let cache = self
             .render_cache
             .volatile_tail
             .as_mut()
             .expect("ensure_volatile_tail runs before volatile_tail_prepass");
-        if cache.lines.is_empty() {
-            return 0;
+        if cache.plain_width != plain_width {
+            cache.plain_width = plain_width;
+            for section in cache.sections_mut() {
+                section.prepass = None;
+            }
         }
-        if cache.plain_width == plain_width {
-            return cache.prepass;
+        let mut total = 0usize;
+        for section in cache.sections_mut() {
+            total += *section.prepass.get_or_insert_with(|| {
+                if section.lines.is_empty() {
+                    0
+                } else {
+                    let plain: Vec<String> =
+                        section.lines.iter().map(|l| l.plain.clone()).collect();
+                    wrap_plain_lines(&plain, plain_width).len()
+                }
+            });
         }
-        let plain: Vec<String> = cache.lines.iter().map(|l| l.plain.clone()).collect();
-        let rows = wrap_plain_lines(&plain, plain_width).len();
-        cache.plain_width = plain_width;
-        cache.prepass = rows;
-        rows
+        total
     }
 
-    /// Word-wraps the cached tail to `text_width`, reusing the previous wrap when
-    /// the width is unchanged. Leaves `wrapped = None` when the tail is empty (so
-    /// it contributes no rows). Must run after [`ensure_volatile_tail`].
+    /// Word-wraps only the sections that changed (all of them after a width
+    /// change); empty sections stay `None` so they contribute no rows. Must run
+    /// after [`ensure_volatile_tail`].
     fn ensure_volatile_tail_wrap(&mut self, text_width: u16) {
         let cache = self
             .render_cache
             .volatile_tail
             .as_mut()
             .expect("ensure_volatile_tail runs before ensure_volatile_tail_wrap");
-        if cache.lines.is_empty() {
-            cache.wrapped = None;
+        if cache.styled_width != text_width {
             cache.styled_width = text_width;
-            return;
+            for section in cache.sections_mut() {
+                section.wrapped = None;
+            }
         }
-        if cache.wrapped.is_some() && cache.styled_width == text_width {
-            return;
+        for section in cache.sections_mut() {
+            if section.wrapped.is_none() && !section.lines.is_empty() {
+                section.wrapped = Some(wrap_transcript(&section.lines, &section.bars, text_width));
+            }
         }
-        cache.wrapped = Some(wrap_transcript(&cache.lines, &cache.bars, text_width));
-        cache.styled_width = text_width;
     }
 
-    /// Composes the final wrapped transcript for this frame: the cached history
-    /// body wrap, the cached volatile-tail wrap (streamed reply + running `!cmd` +
-    /// notice), and the freshly wrapped spinner. Only the spinner — two lines that
-    /// animate — is wrapped per frame; the history and tail wraps are reused from
-    /// their caches, so a growing stream costs O(tail-delta), not O(history+reply)
-    /// every frame. The rest are shallow clones.
-    fn composed_transcript_rows(
-        &self,
-        spinner: Option<&StyledLine>,
-        text_width: u16,
-    ) -> (Text<'static>, Vec<String>, Vec<Option<Color>>) {
-        let wrapped = self
-            .render_cache
-            .transcript
-            .as_ref()
-            .and_then(|cache| cache.wrapped.as_ref())
-            .expect("ensure_transcript_wrap runs before composed_transcript_rows");
-        let mut text_lines: Vec<Line<'static>> = wrapped.text.lines.clone();
-        let mut rows = wrapped.rows.clone();
-        let mut bars = wrapped.bars.clone();
-
-        // The volatile tail already carries its own leading spacing blanks (see
-        // `volatile_tail_blocks`); reuse its cached wrap instead of re-wrapping the
-        // streamed reply every frame. `wrapped` is `None` exactly when the tail is
-        // empty, so this adds no spurious rows.
-        if let Some(tail) = self
-            .render_cache
+    /// The tail sections' cached wraps in display order; valid after
+    /// [`ensure_volatile_tail_wrap`].
+    fn volatile_tail_parts(&self) -> impl Iterator<Item = &WrappedTranscript> {
+        self.render_cache
             .volatile_tail
-            .as_ref()
-            .and_then(|cache| cache.wrapped.as_ref())
-        {
-            text_lines.extend(tail.text.lines.iter().cloned());
-            rows.extend(tail.rows.iter().cloned());
-            bars.extend(tail.bars.iter().cloned());
-        }
+            .iter()
+            .flat_map(|cache| cache.sections())
+            .filter_map(|section| section.wrapped.as_ref())
+    }
 
-        // The spinner mirrors `append_spinner_status` — a leading blank (whenever
-        // anything precedes it, which it always does) then the status line. Wrapped
-        // fresh here, never cached, since it animates every frame.
-        if let Some(spinner) = spinner {
-            let mut tail: Vec<StyledLine> = Vec::new();
-            let mut tail_bars: Vec<Option<Color>> = Vec::new();
-            if !rows.is_empty() {
-                tail.push(blank_line());
-                tail_bars.push(None);
-            }
-            tail.push(spinner.clone());
+    /// The spinner block (leading blank + status + live sub-agent/tool rows),
+    /// mirroring `append_spinner_status`. It animates, so this is the one wrap
+    /// paid per frame — a handful of lines.
+    fn wrapped_spinner_block(
+        &self,
+        spinner: &StyledLine,
+        base_nonempty: bool,
+        text_width: u16,
+    ) -> WrappedTranscript {
+        let mut tail: Vec<StyledLine> = Vec::new();
+        let mut tail_bars: Vec<Option<Color>> = Vec::new();
+        if base_nonempty {
+            tail.push(blank_line());
             tail_bars.push(None);
-            for row in self.subagent_status_rows() {
-                tail.push(row);
-                tail_bars.push(None);
-            }
-            for row in self.tool_output_tail_rows() {
-                tail.push(row);
-                tail_bars.push(None);
-            }
-            let wrapped_tail = wrap_transcript(&tail, &tail_bars, text_width);
-            text_lines.extend(wrapped_tail.text.lines);
-            rows.extend(wrapped_tail.rows);
-            bars.extend(wrapped_tail.bars);
         }
-
-        (Text::from(text_lines), rows, bars)
+        tail.push(spinner.clone());
+        tail_bars.push(None);
+        for row in self.subagent_status_rows() {
+            tail.push(row);
+            tail_bars.push(None);
+        }
+        for row in self.tool_output_tail_rows() {
+            tail.push(row);
+            tail_bars.push(None);
+        }
+        wrap_transcript(&tail, &tail_bars, text_width)
     }
 
     pub(super) fn transcript_intro_lines(&self, width: u16) -> Vec<String> {
@@ -2187,15 +2363,25 @@ impl CodeTuiApp {
         };
         // Word-wrap ourselves to the text width so our row model (scroll, gutter,
         // selection) exactly matches the rendered rows; we render with wrap OFF.
-        // The body and volatile-tail wraps are cached; only the spinner is wrapped
-        // per frame.
+        // The composed transcript is never materialized — counts, hitbox, and the
+        // visible window read the cached segment wraps in place, so a repaint
+        // costs O(visible rows), not O(history + reply).
         self.ensure_transcript_wrap(transcript_text_area.width);
         self.ensure_volatile_tail_wrap(transcript_text_area.width);
-        // `_visual_bars` (per-role gutter colours) is no longer painted here, but
-        // stays in the shared row model since preview/export still use it.
-        let (wrapped_text, visual_rows, _visual_bars) =
-            self.composed_transcript_rows(spinner.as_ref(), transcript_text_area.width);
-        let transcript_total_lines = visual_rows.len();
+        let body_len = self
+            .render_cache
+            .transcript
+            .as_ref()
+            .and_then(|cache| cache.wrapped.as_ref())
+            .expect("ensure_transcript_wrap runs before composition")
+            .rows
+            .len();
+        let tail_len: usize = self.volatile_tail_parts().map(|part| part.rows.len()).sum();
+        let spinner_wrap = spinner.as_ref().map(|line| {
+            self.wrapped_spinner_block(line, body_len + tail_len > 0, transcript_text_area.width)
+        });
+        let transcript_total_lines =
+            body_len + tail_len + spinner_wrap.as_ref().map_or(0, |sw| sw.rows.len());
         self.transcript_width = transcript_text_area.width.max(1);
         self.transcript_view_height = view_height;
         let max_scroll = transcript_total_lines.saturating_sub(usize::from(view_height));
@@ -2207,12 +2393,26 @@ impl CodeTuiApp {
         } else {
             self.transcript_scroll = self.transcript_scroll.min(max_scroll);
         }
+        // Display-order row segments, `Arc`-shared with the caches.
+        let mut segments: Vec<std::sync::Arc<Vec<String>>> = Vec::new();
+        if let Some(body) = self
+            .render_cache
+            .transcript
+            .as_ref()
+            .and_then(|cache| cache.wrapped.as_ref())
+        {
+            segments.push(std::sync::Arc::clone(&body.rows));
+        }
+        for part in self.volatile_tail_parts() {
+            segments.push(std::sync::Arc::clone(&part.rows));
+        }
+        if let Some(sw) = &spinner_wrap {
+            segments.push(std::sync::Arc::clone(&sw.rows));
+        }
         self.transcript_hitbox = Some(TranscriptHitbox {
             area: transcript_text_area,
             first_row: self.transcript_scroll,
-            // Last use of `visual_rows`; move it in rather than re-cloning the
-            // whole-transcript row vector on every repaint.
-            rows: visual_rows,
+            segments,
         });
 
         clear_to_canvas(frame, chunks[0]);
@@ -2225,20 +2425,49 @@ impl CodeTuiApp {
             self.jump_to_bottom_hit = None;
         } else {
             // Pre-wrapped above → render with wrap OFF so rendered rows match.
-            // ratatui's `Paragraph` does NOT virtualize: `.scroll((y, 0))` still
-            // runs EVERY line through its reflow/LineComposer and writes cells
-            // before discarding the scrolled-past rows, so a full-transcript
-            // Paragraph costs O(total rows) per frame. While a turn streams, the
-            // spinner forces a ~60fps repaint, and on the single-thread runtime
-            // that O(n) draw starves the streaming task — a long session makes a
-            // subagent crawl. Slice to the visible window and render at scroll 0
-            // → O(visible rows). The full row model (gutter, selection, hitbox)
-            // below is unchanged, so geometry stays exact.
-            let view_start = self.transcript_scroll.min(wrapped_text.lines.len());
+            // ratatui's `Paragraph` does NOT virtualize (`.scroll` still lays
+            // out every line), so stitch the visible window from the cached
+            // segment wraps and render at scroll 0 — O(visible rows), and the
+            // row model above keeps geometry exact.
+            let view_start = self.transcript_scroll.min(transcript_total_lines);
             let view_end = view_start
                 .saturating_add(usize::from(transcript_text_area.height))
-                .min(wrapped_text.lines.len());
-            let visible_text = Text::from(wrapped_text.lines[view_start..view_end].to_vec());
+                .min(transcript_total_lines);
+            let mut visible_lines: Vec<Line<'static>> =
+                Vec::with_capacity(view_end.saturating_sub(view_start));
+            {
+                let body = self
+                    .render_cache
+                    .transcript
+                    .as_ref()
+                    .and_then(|cache| cache.wrapped.as_ref());
+                let mut parts: Vec<&[Line<'static>]> = Vec::new();
+                if let Some(w) = body {
+                    parts.push(w.text.lines.as_slice());
+                }
+                for part in self.volatile_tail_parts() {
+                    parts.push(part.text.lines.as_slice());
+                }
+                if let Some(w) = &spinner_wrap {
+                    parts.push(w.text.lines.as_slice());
+                }
+                let mut skip = view_start;
+                let mut take = view_end - view_start;
+                for part in parts {
+                    if take == 0 {
+                        break;
+                    }
+                    if skip >= part.len() {
+                        skip -= part.len();
+                        continue;
+                    }
+                    let end = (skip + take).min(part.len());
+                    visible_lines.extend(part[skip..end].iter().cloned());
+                    take -= end - skip;
+                    skip = 0;
+                }
+            }
+            let visible_text = Text::from(visible_lines);
             let transcript_widget = Paragraph::new(visible_text).style(Style::default().fg(TEXT()));
             frame.render_widget(transcript_widget, transcript_text_area);
             self.render_transcript_selection_highlight(frame, transcript_text_area);
@@ -2685,11 +2914,7 @@ impl CodeTuiApp {
             // Clamp the wash to the row's real text so we never paint the blank
             // cells past a line's end — keeps the highlight matching what copy
             // actually yields (trailing space is trimmed on copy).
-            let text_width = hitbox
-                .rows
-                .get(row)
-                .map(|line| row_display_width(line))
-                .unwrap_or(0);
+            let text_width = hitbox.row(row).map(row_display_width).unwrap_or(0);
             let start_col = if row == start.row { start.column } else { 0 };
             let end_col = if row == end.row {
                 end.column

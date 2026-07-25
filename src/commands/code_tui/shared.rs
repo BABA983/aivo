@@ -2053,7 +2053,40 @@ impl TranscriptSelection {
 pub(super) struct TranscriptHitbox {
     pub(super) area: Rect,
     pub(super) first_row: usize,
-    pub(super) rows: Vec<String>,
+    /// Display rows in order (body, tail sections, spinner), `Arc`-shared with
+    /// the render caches so a frame publishes them without copying every row.
+    pub(super) segments: Vec<std::sync::Arc<Vec<String>>>,
+}
+
+impl TranscriptHitbox {
+    #[cfg(test)]
+    pub(super) fn from_rows(area: Rect, first_row: usize, rows: Vec<String>) -> Self {
+        Self {
+            area,
+            first_row,
+            segments: vec![std::sync::Arc::new(rows)],
+        }
+    }
+
+    pub(super) fn rows_len(&self) -> usize {
+        self.segments.iter().map(|seg| seg.len()).sum()
+    }
+
+    pub(super) fn row(&self, mut i: usize) -> Option<&str> {
+        for seg in &self.segments {
+            match seg.get(i) {
+                Some(row) => return Some(row),
+                None => i -= seg.len(),
+            }
+        }
+        None
+    }
+
+    pub(super) fn rows(&self) -> impl Iterator<Item = &str> {
+        self.segments
+            .iter()
+            .flat_map(|seg| seg.iter().map(String::as_str))
+    }
 }
 
 /// Snapshot of the rendered screen so a drag can copy from anywhere on it, not
@@ -2104,22 +2137,69 @@ pub(super) struct TranscriptCache {
 /// (which the 60fps spinner redraw makes O(reply²) over a long answer) into an
 /// O(1) lookup whenever no new token arrived. The spinner itself is excluded (it
 /// animates every frame) and wrapped fresh at compose time.
-pub(super) struct VolatileTailCache {
-    /// Fingerprint of the tail inputs (see `volatile_tail_fp`).
-    pub(super) fp: u64,
-    /// Render width the `lines` markdown/table layout was produced at.
-    pub(super) render_width: u16,
-    /// The rendered tail blocks (each with its leading spacing blank), styled.
+/// One display-ordered slice of the volatile tail, with its own wrap and
+/// pane-height prepass memos so an unchanged section never re-renders.
+pub(super) struct TailSection {
     pub(super) lines: Vec<StyledLine>,
     pub(super) bars: Vec<Option<Color>>,
-    /// Width the `prepass` char-wrap height was computed for (0 = none yet).
-    pub(super) plain_width: u16,
-    /// Char-wrapped row count of `lines`, to size the pane before wrapping.
-    pub(super) prepass: usize,
-    /// Text width `wrapped` is valid for (0 = not wrapped yet).
-    pub(super) styled_width: u16,
-    /// `lines` word-wrapped to `styled_width` (None when `lines` is empty).
+    /// `lines` wrapped to the cache's `styled_width`; `None` when empty or stale.
     pub(super) wrapped: Option<WrappedTranscript>,
+    /// Char-wrapped row count at the cache's `plain_width`.
+    pub(super) prepass: Option<usize>,
+}
+
+impl TailSection {
+    pub(super) fn new(lines: Vec<StyledLine>, bars: Vec<Option<Color>>) -> Self {
+        Self {
+            lines,
+            bars,
+            wrapped: None,
+            prepass: None,
+        }
+    }
+
+    pub(super) fn empty() -> Self {
+        Self::new(Vec::new(), Vec::new())
+    }
+}
+
+/// The tail as display-ordered sections so a streamed token re-renders only
+/// the live remainder: `head` (blank + reasoning window), `settled` (reply
+/// prefix up to the last markdown-safe boundary, rendered once, immutable),
+/// `live` (reply suffix + `!cmd` preview + notice, rebuilt per content change
+/// but bounded by the trailing block, not the reply length).
+pub(super) struct VolatileTailCache {
+    /// Fingerprint of every tail input EXCEPT the reply length (see
+    /// `volatile_tail_fp`); any change resets all sections.
+    pub(super) fp: u64,
+    pub(super) render_width: u16,
+    /// `pending_response` byte length the sections currently cover.
+    pub(super) reply_len: usize,
+    /// `pending_response` bytes covered by `settled` (always a safe boundary).
+    pub(super) settled_src: usize,
+    /// Whether a settled chunk already placed the `◆ ` reply marker.
+    pub(super) settled_marked: bool,
+    pub(super) head: TailSection,
+    pub(super) settled: Vec<TailSection>,
+    pub(super) live: TailSection,
+    /// Width the sections' `prepass` counts are valid for (0 = none yet).
+    pub(super) plain_width: u16,
+    /// Width the sections' `wrapped` forms are valid for (0 = none yet).
+    pub(super) styled_width: u16,
+}
+
+impl VolatileTailCache {
+    pub(super) fn sections(&self) -> impl Iterator<Item = &TailSection> {
+        std::iter::once(&self.head)
+            .chain(self.settled.iter())
+            .chain(std::iter::once(&self.live))
+    }
+
+    pub(super) fn sections_mut(&mut self) -> impl Iterator<Item = &mut TailSection> {
+        std::iter::once(&mut self.head)
+            .chain(self.settled.iter_mut())
+            .chain(std::iter::once(&mut self.live))
+    }
 }
 
 /// Live drag that has reached the top/bottom edge of the transcript: the event

@@ -3013,8 +3013,29 @@ is preserved."
 
     pub(super) fn selected_transcript_text(&self) -> Option<String> {
         let selection = self.transcript_selection?;
-        let rows = &self.transcript_hitbox.as_ref()?.rows;
-        selected_text_from_rows(rows, selection)
+        let hitbox = self.transcript_hitbox.as_ref()?;
+        // Materialize only the selected row range; copy never runs per frame.
+        let (start, end) = normalized_selection(selection);
+        if start.row >= hitbox.rows_len() {
+            return None;
+        }
+        let rows: Vec<String> = hitbox
+            .rows()
+            .skip(start.row)
+            .take(end.row.saturating_sub(start.row) + 1)
+            .map(str::to_string)
+            .collect();
+        let rebased = TranscriptSelection {
+            anchor: TranscriptPoint {
+                row: 0,
+                column: start.column,
+            },
+            focus: TranscriptPoint {
+                row: end.row - start.row,
+                column: end.column,
+            },
+        };
+        selected_text_from_rows(&rows, rebased)
     }
 
     /// Text under the full-screen selection, from the captured [`ScreenSurface`].
