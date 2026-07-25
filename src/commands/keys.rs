@@ -572,6 +572,29 @@ fn format_picker_choice(label: &str, hint: &str) -> String {
     )
 }
 
+/// Provider column for list/picker rows (labels specials instead of sentinels).
+fn key_provider_hint(key: &ApiKey) -> String {
+    if key.is_copilot() {
+        return "GitHub Copilot".to_string();
+    }
+    if key.base_url == "ollama" {
+        return "Ollama (local)".to_string();
+    }
+    if key.is_cursor_acp() {
+        return "Cursor".to_string();
+    }
+    if is_aivo_starter_base(&key.base_url) {
+        return "aivo starter".to_string();
+    }
+    if let Some(label) = key.credential_label() {
+        return label
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_string();
+    }
+    truncate_url_for_display(&key.base_url, 50)
+}
+
 /// AWS regions where Amazon Bedrock is available. Pairs are (region, city) so
 /// the fuzzy filter can match either form.
 const BEDROCK_REGIONS: &[(&str, &str)] = &[
@@ -1208,7 +1231,7 @@ impl KeysCommand {
             };
             let url_col = match &starter {
                 Some(label) => style::dim(label),
-                None => style::dim(truncate_url_for_display(&key.base_url, 50)),
+                None => style::dim(key_provider_hint(key)),
             };
             println!(
                 "{} {}  {}  {}",
@@ -1309,7 +1332,12 @@ impl KeysCommand {
                     style::dim(&padded)
                 }
                 None => {
-                    let url_display = truncate_url_for_display(&key.base_url, url_display_width);
+                    let hint = key_provider_hint(&key);
+                    let url_display = if hint.len() > url_display_width {
+                        truncate_url_for_display(&key.base_url, url_display_width)
+                    } else {
+                        hint
+                    };
                     let url_padded = format!("{:<width$}", url_display, width = url_display_width);
                     style::dim(&url_padded)
                 }
@@ -1728,13 +1756,13 @@ impl KeysCommand {
             return self.edit_bedrock_key(key, &current_region).await;
         }
 
-        // OAuth and cursor shadow entries hold credential blobs or
-        // sentinels in their slots — there is no meaningful base URL or
-        // user-editable "API key" to change in place. Only the display
-        // name is safe to edit; everything else is preserved verbatim.
-        // (To swap a cursor key's API key or re-login, `keys rm` then
-        // `keys add cursor`.)
+        // OAuth/cursor: name only — refresh credentials with `keys reauth`.
         if key.is_any_oauth() || key.is_cursor_acp() {
+            eprintln!(
+                "  {} To refresh login credentials, run {}",
+                style::dim("tip:"),
+                style::cyan(format!("aivo keys reauth {}", key.display_name())),
+            );
             keys_ui::step_header(1, 1, "Name", "a short label for this key");
             let name = edit_name(&key)?;
 
@@ -1860,23 +1888,8 @@ impl KeysCommand {
         Ok(ExitCode::Success)
     }
 
-    /// Bedrock-aware edit flow that mirrors the add flow's region picker.
-    /// Editing the raw URL is hostile — the user has to know the host
-    /// shape (`bedrock-runtime.<region>.amazonaws.com` vs the mantle
-    /// form) and substitute the region by hand. Instead we extract the
-    /// region from the stored URL, show the same fuzzy picker the add
-    /// flow uses (pre-selected on the current region), and substitute
-    /// Re-authenticate a key without removing it.
-    ///
-    /// - OAuth keys (claude / codex / gemini): drive the standard
-    ///   browser-login flow and replace the stored credential blob.
-    /// - Cursor OAuth shadow: re-run `cursor-agent login` against the
-    ///   existing shadow so the same aivo key id keeps working.
-    /// - Cursor API-key shadow: prompt for a fresh key and update the
-    ///   embedded value in place.
-    ///
-    /// Plain REST API keys aren't supported (they're a single value with
-    /// no re-auth concept — use `keys edit` to rotate manually).
+    /// Re-login OAuth/Cursor credentials in place. Plain API keys: `keys edit`.
+    /// Copilot: remove and re-add.
     async fn reauth_key(&self, key_id_or_name: Option<&str>) -> Result<ExitCode> {
         let key = match self
             .resolve_key_selection(
@@ -1993,13 +2006,7 @@ impl KeysCommand {
         Ok(ExitCode::Success)
     }
 
-    /// the new region back into the existing URL — preserving the
-    /// runtime-vs-mantle form the user originally chose.
-    ///
-    /// ESC on the region picker means "keep current region", consistent
-    /// with the edit flow's "Press Enter to keep" idiom (rather than
-    /// add's "ESC cancels the whole flow"); the user can still abandon
-    /// the edit with Ctrl-C.
+    /// Edit a Bedrock key via region picker (ESC keeps the current region).
     async fn edit_bedrock_key(&self, key: ApiKey, current_region: &str) -> Result<ExitCode> {
         // Name (same shape as the generic edit flow).
         keys_ui::step_header(1, 3, "Name", "a short label for this key");
@@ -2223,6 +2230,7 @@ impl KeysCommand {
             .interact_opt()?;
 
         let Some(idx) = selection else {
+            println!("{}", style::dim("Cancelled."));
             return Ok(ExitCode::Success);
         };
 
@@ -3423,6 +3431,15 @@ fn print_help_add() {
         style::dim("Add a new API key. With no flags, prompts interactively.")
     );
     println!();
+    println!("{}", style::bold("Interactive picker includes:"));
+    keys_help_row(
+        "Presets",
+        "OpenRouter, Anthropic, Groq, Bedrock, … (API key)",
+    );
+    keys_help_row("OAuth", "Codex, Claude Code, SuperGrok, Kimi Code");
+    keys_help_row("Other", "GitHub Copilot, Cursor, Ollama, aivo starter");
+    keys_help_row("Custom URL", "Any OpenAI-compatible base URL + API key");
+    println!();
     println!("{}", style::bold("Options:"));
     keys_help_row("--name <name>", "Display name (skips the name prompt)");
     keys_help_row(
@@ -3434,6 +3451,7 @@ fn print_help_add() {
     println!("{}", style::bold("Examples:"));
     println!("  {}", style::dim("aivo keys add"));
     println!("  {}", style::dim("aivo keys add openrouter"));
+    println!("  {}", style::dim("aivo keys add cursor --api-key key_…"));
     println!(
         "  {}",
         style::dim("aivo keys add --name abc --base-url https://example.io --api-key sk-...")
@@ -3485,8 +3503,13 @@ fn print_help_reauth() {
     println!(
         "{}",
         style::dim(
-            "Re-authenticate a stored key: OAuth re-login (codex/gemini/claude/copilot) or rotate a plain API key. Bare opens the picker."
+            "Re-authenticate a stored key without removing it: OAuth re-login (codex/claude/grok/kimi) or Cursor login/API key. Bare opens the picker."
         )
+    );
+    println!();
+    println!(
+        "{}",
+        style::dim("Copilot: remove and re-add. Plain API keys: use `aivo keys edit` to rotate.")
     );
     println!();
     println!("{}", style::bold("Examples:"));
@@ -3593,7 +3616,7 @@ pub(crate) fn format_key_choice(key: &ApiKey) -> String {
         "{}  {}  {}",
         style::cyan(format!("{:<3}", key.short_id())),
         key.display_name(),
-        style::dim(&key.base_url)
+        style::dim(key_provider_hint(key))
     )
 }
 
@@ -4378,6 +4401,38 @@ mod tests {
 
         assert!(choice.contains("a2b"));
         assert!(choice.contains("https://openrouter.ai/api/v1"));
+    }
+
+    #[test]
+    fn key_provider_hint_labels_specials() {
+        use crate::services::codex_oauth::CODEX_OAUTH_SENTINEL;
+
+        let copilot = ApiKey::new_with_protocol(
+            "id".into(),
+            "copilot".into(),
+            "copilot".into(),
+            None,
+            "tok".into(),
+        );
+        assert_eq!(key_provider_hint(&copilot), "GitHub Copilot");
+
+        let oauth = ApiKey::new_with_protocol(
+            "id".into(),
+            "codex".into(),
+            CODEX_OAUTH_SENTINEL.into(),
+            None,
+            "{}".into(),
+        );
+        assert_eq!(key_provider_hint(&oauth), "Codex OAuth");
+
+        let url = ApiKey::new_with_protocol(
+            "id".into(),
+            "groq".into(),
+            "https://api.groq.com/openai/v1".into(),
+            None,
+            "sk".into(),
+        );
+        assert!(key_provider_hint(&url).contains("api.groq.com"));
     }
 
     #[test]
