@@ -1118,7 +1118,11 @@ impl AgentUi for HeadlessAgentUi {
         }
         match self.format {
             OutputFormat::Text | OutputFormat::Json => {
-                eprintln!("⏺ {name} {}", one_line(&args.to_string()));
+                eprintln!(
+                    "{}{name} {}",
+                    crate::style::AGENT_MARKER,
+                    one_line(&args.to_string())
+                );
             }
             OutputFormat::StreamJson => {
                 self.emit(

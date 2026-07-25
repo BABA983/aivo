@@ -917,7 +917,7 @@ impl CodeTuiApp {
             let freed = before.saturating_sub(context_tokens) as usize;
             self.notice = Some(freed_notice(freed, "summarized older turns"));
         } else {
-            // `✶ Done in …` marker — skipped under 1s and on an errored turn. Attach
+            // `✻ Done in …` marker — skipped under 1s and on an errored turn. Attach
             // to the last VISIBLE entry: a trailing plan renders in its own panel, so
             // stamping it there hides/misplaces the marker once the plan clears.
             let errored = self.notice.as_ref().is_some_and(|(c, _)| *c == ERROR());
@@ -982,7 +982,7 @@ impl CodeTuiApp {
                 self.session_cost_usd += cost;
             }
             // The spinner's live token count vanishes at turn end — keep the
-            // final figure on the `✶ Done` line.
+            // final figure on the `✻ Done` line.
             if let Some(idx) = done_idx
                 && turn.completion_tokens > 0
             {
@@ -2653,7 +2653,7 @@ impl CodeTuiApp {
 
     /// While a decision card is up, push the step + turn clocks forward by each
     /// waiting interval — decision time must not read as tool runtime or
-    /// inflate `✶ Done in …`. Called per frame beside `tick_status_throttle`.
+    /// inflate `✻ Done in …`. Called per frame beside `tick_status_throttle`.
     pub(super) fn tick_decision_wait(&mut self) {
         let waiting = self.sending && self.cards.any_agent_card();
         if !waiting {

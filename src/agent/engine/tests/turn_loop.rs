@@ -399,7 +399,7 @@ async fn empty_completion_is_not_recorded_as_assistant_turn() {
             .iter()
             .any(|m| role(m) == "user" && content_str(m) == "hi")
     );
-    // No answer must ride the ERROR channel (persisted entry, no `✶ Done`,
+    // No answer must ride the ERROR channel (persisted entry, no `✻ Done`,
     // headless fails closed).
     assert!(
         ui.errors.iter().any(|e| e.contains("empty response")),

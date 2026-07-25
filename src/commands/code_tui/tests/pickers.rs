@@ -420,8 +420,8 @@ fn test_session_preview_lines_collapses_tool_runs() {
         "tool run should collapse to one nested line: {plain:?}"
     );
     assert!(
-        plain.iter().any(|l| l.starts_with("⏺ hi back")),
-        "assistant turn should lead with the ⏺ marker: {plain:?}"
+        plain.iter().any(|l| l.starts_with("◆ hi back")),
+        "assistant turn should lead with the ◆ marker: {plain:?}"
     );
     assert!(
         plain.iter().any(|l| l.starts_with("❯ hello there")),

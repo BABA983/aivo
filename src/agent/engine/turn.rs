@@ -267,7 +267,7 @@ impl AgentEngine {
                 && message.content.as_deref().is_none_or(str::is_empty);
             if no_output {
                 // No answer = a failed turn: the error channel persists it, skips
-                // the `✶ Done` marker, and fails a headless run closed.
+                // the `✻ Done` marker, and fails a headless run closed.
                 ui.notify_error("the model returned an empty response — no answer produced");
                 converged = true;
                 break;

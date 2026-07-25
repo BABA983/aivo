@@ -392,7 +392,7 @@ pub(super) const TYPEWRITER_CATCHUP_DIVISOR: usize = 2;
 /// repaint; leftover events are drained on the next tick.
 pub(super) const MAX_INPUT_EVENTS_PER_TICK: usize = 512;
 
-// One-column message indent so transcript `❯`/`⏺` markers line up with the
+// One-column message indent so transcript `❯`/`◆` markers line up with the
 // composer's in-box prompt (border col 0, glyph col 1) and text columns match.
 pub(super) const ACCENT_GUTTER_WIDTH: u16 = 1;
 
@@ -411,7 +411,7 @@ pub(super) const APP_LEFT_MARGIN: u16 = 0;
 pub(super) const APP_TOP_MARGIN: u16 = 0;
 
 // Every non-main block (thinking, tool calls/results, shell, meta) nests this many
-// columns under the `> `/`⏺ ` turns — aligned with their body text.
+// columns under the `> `/`◆ ` turns — aligned with their body text.
 pub(super) const SUB_BLOCK_INDENT: u16 = 2;
 
 /// The pinned plan panel never crushes the transcript below this many rows, and
@@ -2669,7 +2669,7 @@ pub(super) struct CodeTuiApp {
     pub(super) last_tool_action: Option<(String, Instant, Option<u64>)>,
     /// Last frame tick seen while a decision card was up — `tick_decision_wait`
     /// pushes the step + turn clocks forward so human decision time never reads
-    /// as tool runtime or inflates `✶ Done in …`.
+    /// as tool runtime or inflates `✻ Done in …`.
     pub(super) wait_tick: Option<Instant>,
     /// When the turn last produced any runtime event, for the stall label.
     pub(super) last_stream_activity: Option<Instant>,
@@ -2992,9 +2992,9 @@ pub(super) struct CodeTuiApp {
     /// In-memory only, cleared alongside `expanded_thinking`.
     pub(super) reasoning_durations: std::collections::HashMap<usize, u64>,
     /// Wall time (ms) a finished turn took, by the history index of its last entry;
-    /// drives the `✶ Done in …` marker. In-memory only, cleared with `expanded_thinking`.
+    /// drives the `✻ Done in …` marker. In-memory only, cleared with `expanded_thinking`.
     pub(super) turn_durations: std::collections::HashMap<usize, u64>,
-    /// Completion note appended to the `✶ Done in …` marker (this turn's tokens
+    /// Completion note appended to the `✻ Done in …` marker (this turn's tokens
     /// and estimated cost), keyed and cleared like `turn_durations`.
     pub(super) turn_notes: std::collections::HashMap<usize, String>,
     /// When the current segment's reasoning started streaming (first reasoning

@@ -23,7 +23,7 @@ fn test_finished_turn_renders_done_marker() {
     app.transcript_revision = app.transcript_revision.wrapping_add(1);
 
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("✶ Done in 6m 44s"), "{plain}");
+    assert!(plain.contains("✻ Done in 6m 44s"), "{plain}");
 
     // No recorded duration → no marker.
     app.turn_durations.clear();
@@ -221,7 +221,7 @@ fn test_welcome_tip_wraps_whole_on_narrow_terminals() {
     app.welcome_tip_index = 0; // "start a line with ! to run a shell command"
 
     let (screen, _) = render_full_screen(&mut app, 36, 22);
-    assert!(screen.contains("✶ Tip"), "tip line missing:\n{screen}");
+    assert!(screen.contains("✻ Tip"), "tip line missing:\n{screen}");
     assert!(screen.contains("command"), "tip tail clipped:\n{screen}");
     assert!(
         !screen.contains("/help commands"),
@@ -819,7 +819,7 @@ fn test_done_marker_appends_turn_note() {
     app.turn_durations.insert(idx, 42_000);
     app.turn_notes.insert(idx, "3.1k tokens".to_string());
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("✶ Done in 42s · 3.1k tokens"), "{plain}");
+    assert!(plain.contains("✻ Done in 42s · 3.1k tokens"), "{plain}");
 }
 
 #[tokio::test]
@@ -1196,7 +1196,7 @@ fn test_welcome_shows_capability_chip_and_tip() {
         "missing chip:\n{screen}"
     );
     assert!(
-        screen.contains("✶ Tip"),
+        screen.contains("✻ Tip"),
         "missing tip label + glyph:\n{screen}"
     );
     assert!(

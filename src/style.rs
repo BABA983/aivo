@@ -115,6 +115,10 @@ pub fn bullet_symbol() -> String {
     green("●")
 }
 
+/// Agent-turn marker. `◆` not `⏺`: emoji-capable glyphs render as color
+/// emoji where the font lacks them (Termux).
+pub const AGENT_MARKER: &str = "◆ ";
+
 /// Convenience function for the "○" empty bullet symbol.
 pub fn empty_bullet_symbol() -> String {
     dim("○")

@@ -309,7 +309,7 @@ impl CodeTuiApp {
                         }
                     }
                 }
-                // Drawn under its call; empty block still carries a `✶ Done in` marker.
+                // Drawn under its call; empty block still carries a `✻ Done in` marker.
                 "tool_result" if consumed_results.contains(&idx) => {}
                 "tool_result" => {
                     // `tool` fixes the unit (files/entries/matches); a detached
@@ -351,7 +351,7 @@ impl CodeTuiApp {
                     text_width.saturating_sub(SUB_BLOCK_INDENT),
                 ),
             }
-            // User `> ` turns and `⏺ ` replies are main blocks; everything else in
+            // User `> ` turns and `◆ ` replies are main blocks; everything else in
             // `block` (tool calls, shell, plan/error/system notes) nests under them.
             let block = if message.role == "user" {
                 block
@@ -360,7 +360,7 @@ impl CodeTuiApp {
             };
             let bar = role_bar_color(message.role.as_str());
             push_block(&mut lines, &mut bars, block, Some(bar));
-            // The `✶ Done in …` marker for a turn stamped on its last entry (which
+            // The `✻ Done in …` marker for a turn stamped on its last entry (which
             // may sit inside a coalesced block, so scan the block's index range).
             if let Some((i, &ms)) =
                 (idx..idx + advance).find_map(|i| self.turn_durations.get(&i).map(|ms| (i, ms)))
@@ -376,7 +376,7 @@ impl CodeTuiApp {
                 push_styled_line(
                     &mut lines,
                     format!(
-                        "  ✶ Done in {}{note}",
+                        "  ✻ Done in {}{note}",
                         format_request_elapsed(std::time::Duration::from_millis(ms))
                     ),
                     Style::default().fg(MUTED()).add_modifier(Modifier::ITALIC),
@@ -2869,7 +2869,7 @@ impl CodeTuiApp {
         let tip = WELCOME_TIPS[self.welcome_tip_index % WELCOME_TIPS.len()];
         lines.push(line_with_plain(vec![
             // MUTED hint (up from FAINT) so the tip reads on dim terminals.
-            Span::styled("✶ Tip  ", Style::default().fg(ACCENT())),
+            Span::styled("✻ Tip  ", Style::default().fg(ACCENT())),
             Span::styled(tip.to_string(), Style::default().fg(MUTED())),
         ]));
         lines

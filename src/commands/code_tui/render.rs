@@ -559,7 +559,7 @@ pub(super) fn composer_attachment_lines(attachments: &[MessageAttachment]) -> Ve
 }
 
 /// `/resume` preview transcript, in the live transcript's marker style: user
-/// turns lead with `❯ `, assistant turns with `⏺ `, a tool run collapses to one
+/// turns lead with `❯ `, assistant turns with `◆ `, a tool run collapses to one
 /// nested `⚙ n tool steps` line, reasoning/plan skipped.
 pub(super) fn session_preview_lines(
     messages: &[ChatMessage],
@@ -620,7 +620,12 @@ pub(super) fn session_preview_lines(
                 render_assistant_message(&mut block, None, &message.content, body_width);
                 push_trimmed(
                     &mut lines,
-                    mark_block(block, body_width, "⏺ ", Style::default().fg(ACCENT())),
+                    mark_block(
+                        block,
+                        body_width,
+                        crate::style::AGENT_MARKER,
+                        Style::default().fg(ACCENT()),
+                    ),
                 );
                 prev_role = Some("assistant");
                 index += 1;
@@ -789,7 +794,7 @@ pub(super) struct ReasoningView<'a> {
     pub(super) expanded: bool,
 }
 
-/// Column cost of a turn marker (glyph + trailing space): `⏺ ` reply, `> ` user.
+/// Column cost of a turn marker (glyph + trailing space): `◆ ` reply, `> ` user.
 pub(super) const TURN_MARKER_W: u16 = 2;
 
 /// Prefix the first non-blank row with `marker`, hang-indent the rest by its width.
@@ -837,7 +842,7 @@ fn mark_block(
 
 /// Push an assistant turn as up to two blocks: the thinking block is barless so it
 /// recedes as meta; the answer carries `content_bar`. Separate blocks keep the
-/// answer's bar from bleeding up into the reasoning. `mark` adds the `⏺ ` reply
+/// answer's bar from bleeding up into the reasoning. `mark` adds the `◆ ` reply
 /// bullet; plan cards reuse this without it.
 pub(super) fn push_assistant_blocks(
     lines: &mut Vec<StyledLine>,
@@ -850,7 +855,7 @@ pub(super) fn push_assistant_blocks(
 ) {
     if let Some(view) = reasoning.filter(|v| reasoning_is_substantive(v.text)) {
         let mut block = Vec::new();
-        // Thinking nests under the `⏺ ` answer: build to the inset width, then indent.
+        // Thinking nests under the `◆ ` answer: build to the inset width, then indent.
         let nested_width = width.saturating_sub(SUB_BLOCK_INDENT);
         if view.expanded {
             render_reasoning_full(&mut block, view.text, nested_width);
@@ -873,7 +878,12 @@ pub(super) fn push_assistant_blocks(
         };
         render_assistant_message(&mut block, None, content, body_width);
         let block = if mark {
-            mark_block(block, body_width, "⏺ ", Style::default().fg(ACCENT()))
+            mark_block(
+                block,
+                body_width,
+                crate::style::AGENT_MARKER,
+                Style::default().fg(ACCENT()),
+            )
         } else {
             block
         };
@@ -2253,7 +2263,7 @@ fn indent_tool_detail(sl: StyledLine) -> StyledLine {
     indent_styled_line(sl, 2)
 }
 
-/// Nest an activity block under the `> `/`⏺ ` turn; blank rows stay empty so
+/// Nest an activity block under the `> `/`◆ ` turn; blank rows stay empty so
 /// copied text and spacing detection keep working.
 pub(super) fn indent_sub_block(block: Vec<StyledLine>) -> Vec<StyledLine> {
     block

@@ -833,7 +833,7 @@ fn test_render_main_omits_accent_gutter_bars() {
         }
     }
 
-    // User turns marked `❯ ` (like the prompt), the agent `⏺ `; both in the same column.
+    // User turns marked `❯ ` (like the prompt), the agent `◆ `; both in the same column.
     let user_y = (0..16u16)
         .find(|&y| row_text(y).contains("ping"))
         .expect("user message row");
@@ -852,13 +852,13 @@ fn test_render_main_omits_accent_gutter_bars() {
         .find(|r| r.contains("alpha"))
         .expect("assistant message row");
     assert!(
-        assistant_row.contains("⏺ "),
-        "assistant turn should carry a `⏺ ` bullet, got {assistant_row:?}"
+        assistant_row.contains("◆ "),
+        "assistant turn should carry a `◆ ` bullet, got {assistant_row:?}"
     );
     assert_eq!(
         user_row.find('❯'),
-        assistant_row.find('⏺'),
-        "user `❯` and agent `⏺` markers must share a column"
+        assistant_row.find('◆'),
+        "user `❯` and agent `◆` markers must share a column"
     );
 }
 

@@ -108,16 +108,17 @@ directory. I should check git status and recent git log."
     app.transcript_revision = app.transcript_revision.wrapping_add(1);
     let full = app.build_transcript();
     let wrapped = wrap_transcript(&full.lines, &full.bar_colors, app.transcript_width);
+    // Nested `  ✻ ` = thinking marker; the flush `✻ Tip` line isn't.
     let think: Vec<&String> = wrapped
         .rows
         .iter()
-        .filter(|r| r.contains("git") || r.trim_start().starts_with("✻"))
+        .filter(|r| r.contains("git") || r.starts_with("  ✻ "))
         .collect();
     assert!(
         think.len() >= 2,
         "the thought wrapped to multiple rows: {think:?}"
     );
-    // Thinking is a sub-block: the marker row nests two columns under the `⏺ ` turn.
+    // Thinking is a sub-block: the marker row nests two columns under the `◆ ` turn.
     assert!(
         think[0].starts_with("  ✻ "),
         "first row carries the nested marker: {:?}",
@@ -145,7 +146,7 @@ fn test_build_transcript_hides_streaming_reasoning_when_disabled() {
     let plain = transcript.plain_lines.join("\n");
 
     assert!(!plain.contains("▸ thought"));
-    assert!(!plain.contains("✻"));
+    assert!(!plain.contains("  ✻"));
     assert!(!plain.contains("Inspecting the request"));
     assert!(plain.contains("Working on it"));
 }
@@ -305,7 +306,7 @@ fn test_history_reasoning_windows_when_thinking_enabled() {
     app.thinking_enabled = false;
     app.transcript_revision = app.transcript_revision.wrapping_add(1);
     let hidden = app.build_transcript().plain_lines.join("\n");
-    assert!(!hidden.contains("✻"));
+    assert!(!hidden.contains("  ✻"));
     assert!(!hidden.contains("the private chain of thought"));
     assert!(hidden.contains("the answer"));
 }
