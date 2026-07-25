@@ -1261,11 +1261,8 @@ fn apply_pi_reasoning_fields(
     }
 }
 
-/// Map catalog-advertised effort levels onto pi's `thinkingLevelMap`.
-///
-/// - `off` → `"none"` when the catalog uses OpenAI's off spelling
-/// - self-map every advertised level so `xhigh`/`max` become selectable
-/// - set unadvertised `minimal` to `null` so pi won't offer values that 400
+/// Catalog effort levels → pi `thinkingLevelMap`: null prunes a level from
+/// pi's ladder, `xhigh`/`max` are opt-in (omission excludes them).
 fn pi_thinking_level_map(efforts: &[String]) -> Option<Value> {
     if efforts.is_empty() {
         return None;
@@ -1275,11 +1272,17 @@ fn pi_thinking_level_map(efforts: &[String]) -> Option<Value> {
     if has("none") {
         map.insert("off".into(), json!("none"));
     }
-    for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+    for level in ["minimal", "low", "medium", "high"] {
+        let v = if has(level) {
+            json!(level)
+        } else {
+            Value::Null
+        };
+        map.insert(level.to_string(), v);
+    }
+    for level in ["xhigh", "max"] {
         if has(level) {
             map.insert(level.to_string(), json!(level));
-        } else if level == "minimal" {
-            map.insert(level.to_string(), Value::Null);
         }
     }
     Some(Value::Object(map))
@@ -3768,6 +3771,7 @@ mod tests {
             "gpt-5.6-sol".to_string(),
             "plain-chat".to_string(),
             "flag-only-reasoner".to_string(),
+            "deepseek-high-only".to_string(),
         ];
         let mut limits = HashMap::new();
         limits.insert(
@@ -3798,6 +3802,15 @@ mod tests {
                 output: Some(64_000),
                 caps: crate::services::model_metadata::snapshot_limits("o3"),
                 reasoning_efforts: Vec::new(),
+            },
+        );
+        limits.insert(
+            "deepseek-high-only".to_string(),
+            crate::services::model_metadata::ResolvedLimits {
+                context: Some(128_000),
+                output: Some(64_000),
+                caps: None,
+                reasoning_efforts: ["high", "xhigh"].map(String::from).to_vec(),
             },
         );
 
@@ -3831,6 +3844,22 @@ mod tests {
         );
         // No effort list → no map (pi still offers off/minimal/low/medium/high).
         assert!(flag_only.get("thinkingLevelMap").is_none());
+
+        let sparse = by_id("deepseek-high-only");
+        assert_eq!(sparse["reasoning"], true);
+        let map = sparse["thinkingLevelMap"].as_object().unwrap();
+        assert_eq!(map["xhigh"], "xhigh");
+        for level in ["minimal", "low", "medium"] {
+            assert!(map[level].is_null(), "{level} must be nulled, not offered");
+        }
+        assert!(
+            !map.contains_key("off"),
+            "unmapped off → pi omits the param"
+        );
+        assert!(
+            !map.contains_key("max"),
+            "max is opt-in; omission excludes it"
+        );
     }
 
     #[test]
