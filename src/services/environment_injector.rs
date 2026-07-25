@@ -1250,8 +1250,8 @@ fn apply_pi_reasoning_fields(
     entry: &mut Value,
     limits: &crate::services::model_metadata::ResolvedLimits,
 ) {
-    let reasoning = !limits.reasoning_efforts.is_empty()
-        || limits.caps.is_some_and(|c| c.reasoning);
+    let reasoning =
+        !limits.reasoning_efforts.is_empty() || limits.caps.is_some_and(|c| c.reasoning);
     if !reasoning {
         return;
     }
