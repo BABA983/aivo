@@ -89,6 +89,9 @@ impl CodeTuiApp {
                 step,
             } => self.apply_subagent_slot(slot, agent, tool, args, step),
             RuntimeEvent::AgentSubDenied { slot, tool } => self.apply_subagent_denied(slot, tool),
+            RuntimeEvent::AgentSubTokens { slot, tokens } => {
+                self.apply_subagent_tokens(slot, tokens)
+            }
             RuntimeEvent::AgentSubDone {
                 slot,
                 ok,
@@ -571,6 +574,7 @@ impl CodeTuiApp {
     /// Unnamed delegates get numbered so every row stays distinguishable.
     pub(super) fn apply_subagent_begin(&mut self, labels: Vec<String>) {
         let now = Instant::now();
+        self.subagent_token_base = self.turn_output_tokens;
         self.subagent_rows = labels
             .into_iter()
             .enumerate()
@@ -584,9 +588,24 @@ impl CodeTuiApp {
                 step: 0,
                 started: now,
                 denied: None,
+                live_tokens: 0,
                 done: None,
             })
             .collect();
+    }
+
+    pub(super) fn apply_subagent_tokens(&mut self, slot: usize, tokens: u64) {
+        let Some(row) = self.subagent_rows.get_mut(slot) else {
+            return;
+        };
+        row.live_tokens = tokens;
+        self.recompute_subagent_turn_tokens();
+    }
+
+    fn recompute_subagent_turn_tokens(&mut self) {
+        let sum: u64 = self.subagent_rows.iter().map(|r| r.live_tokens).sum();
+        self.turn_output_tokens = self.subagent_token_base.saturating_add(sum);
+        self.turn_stream_chars_measured = self.turn_stream_chars;
     }
 
     /// The action label is precomputed here so rendering stays pure.
@@ -644,8 +663,10 @@ impl CodeTuiApp {
         tokens: u64,
     ) -> Option<String> {
         let row = self.subagent_rows.get_mut(slot)?;
+        row.live_tokens = tokens;
         row.done = Some((ok, steps, tokens, row.started.elapsed()));
         let name = row.name.clone();
+        self.recompute_subagent_turn_tokens();
         self.last_subagents
             .iter()
             .any(|s| s.name == name)

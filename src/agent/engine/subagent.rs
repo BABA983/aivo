@@ -419,11 +419,22 @@ pub(super) struct SubagentUi<'a> {
     pub(super) parent: Option<&'a mut dyn AgentUi>,
     /// Slot-tagged live feed for the detached (parallel) path, where `parent` is `None`.
     pub(super) sink: Option<(std::sync::Arc<dyn SubagentSink>, usize)>,
+    /// Parent turn's completion tokens when the delegate spawned.
     pub(super) base: u64,
     /// Specialist name + turn counter, forwarded to the parent's status feed.
     pub(super) agent_name: String,
     pub(super) turn_no: usize,
+    /// Streamed chars since the last measured usage report.
+    pub(super) unmeasured_chars: u64,
+    /// Last measured output-token total for this delegate.
+    pub(super) measured_output: u64,
+    /// Last estimate forwarded; streamed growth below the quantum is skipped.
+    pub(super) last_forwarded: u64,
 }
+
+/// Streamed growth must move the estimate this much before it forwards again,
+/// so every provider delta doesn't become a channel event.
+const LIVE_FORWARD_QUANTUM: u64 = 8;
 
 impl SubagentUi<'_> {
     /// The sub-agent's answer: the converging step's text, else the last non-empty step's.
@@ -468,6 +479,32 @@ impl SubagentUi<'_> {
             s.activity(*slot, agent_name, tool, args, *turn_no);
         }
     }
+
+    /// `force` pushes measured updates through unconditionally; streamed growth
+    /// is quantized. The sink path deliberately omits `base`: the TUI adds it
+    /// once per batch, where adding it per slot would multiply it.
+    fn forward_live_tokens(&mut self, force: bool) {
+        let output = self
+            .measured_output
+            .saturating_add(crate::agent::tokens::chars_to_tokens(self.unmeasured_chars));
+        if !force && output.saturating_sub(self.last_forwarded) < LIVE_FORWARD_QUANTUM {
+            return;
+        }
+        self.last_forwarded = output;
+        if let Some(p) = self.parent.as_deref_mut() {
+            p.turn_tokens(self.base.saturating_add(output));
+        } else if let Some((s, slot)) = &self.sink {
+            s.tokens(*slot, output);
+        }
+    }
+
+    fn note_stream_chars(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
+        self.unmeasured_chars = self.unmeasured_chars.saturating_add(n);
+        self.forward_live_tokens(false);
+    }
 }
 
 impl AgentUi for SubagentUi<'_> {
@@ -481,6 +518,10 @@ impl AgentUi for SubagentUi<'_> {
     }
     fn assistant_text(&mut self, delta: &str) {
         self.cur_text.push_str(delta);
+        self.note_stream_chars(delta.len() as u64);
+    }
+    fn assistant_reasoning(&mut self, delta: &str) {
+        self.note_stream_chars(delta.len() as u64);
     }
     fn discard_streamed_segment(&mut self) {
         self.cur_text.clear();
@@ -497,10 +538,9 @@ impl AgentUi for SubagentUi<'_> {
         self.tokens = tokens;
     }
     fn turn_tokens(&mut self, output: u64) {
-        let total = self.base.saturating_add(output);
-        if let Some(p) = self.parent.as_deref_mut() {
-            p.turn_tokens(total);
-        }
+        self.measured_output = output;
+        self.unmeasured_chars = 0;
+        self.forward_live_tokens(true);
     }
     fn ask_permission<'a>(
         &'a mut self,

@@ -18,6 +18,36 @@ fn subagent_forwards_live_tokens_to_parent_with_base() {
     assert_eq!(parent.turn_token_reports, vec![120, 155]);
 }
 
+#[test]
+fn subagent_forwards_live_tokens_to_sink() {
+    #[derive(Default)]
+    struct Recording(std::sync::Mutex<Vec<(usize, u64)>>);
+    impl SubagentSink for Recording {
+        fn begin(&self, _: &[String]) {}
+        fn activity(&self, _: usize, _: &str, _: &str, _: &Value, _: usize) {}
+        fn denied(&self, _: usize, _: &str) {}
+        fn tokens(&self, slot: usize, output: u64) {
+            self.0.lock().unwrap().push((slot, output));
+        }
+        fn done(&self, _: usize, _: bool, _: usize, _: u64) {}
+        fn finish(&self) {}
+    }
+    let sink = std::sync::Arc::new(Recording::default());
+    let mut sub = SubagentUi {
+        base: 100,
+        sink: Some((sink.clone(), 2)),
+        ..Default::default()
+    };
+    sub.turn_tokens(20);
+    sub.assistant_text(&"x".repeat(400));
+    sub.turn_tokens(55);
+    drop(sub);
+    assert_eq!(
+        sink.0.lock().unwrap().clone(),
+        vec![(2, 20), (2, 120), (2, 55)]
+    );
+}
+
 /// `turn_start` bumps the step + reports thinking (empty tool); `tool_start`
 /// reports the tool — both tagged with the specialist name and 1-based step.
 #[test]
@@ -522,6 +552,7 @@ async fn subagent_ui_sink_forwards_activity_and_denies_visibly() {
         fn denied(&self, slot: usize, tool: &str) {
             self.0.lock().unwrap().push(format!("denied:{slot}:{tool}"));
         }
+        fn tokens(&self, _: usize, _: u64) {}
         fn done(&self, slot: usize, ok: bool, steps: usize, _tokens: u64) {
             self.0
                 .lock()

@@ -267,6 +267,8 @@ impl AgentEngine {
                 .turn_usage
                 .completion_tokens
                 .saturating_add(sub_tokens_total);
+            // Keep the status counter at the folded total after sink rows clear.
+            ui.turn_tokens(self.turn_usage.completion_tokens);
             sequential_idx.retain(|i| !subagent_idx.contains(i));
         }
 

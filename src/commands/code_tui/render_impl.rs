@@ -617,10 +617,10 @@ impl CodeTuiApp {
             let mut parts: Vec<String> = Vec::new();
             // Measured rounds + chars/4 of the stream since, so the count keeps
             // ticking through a long thought.
-            let unmeasured = self
-                .turn_stream_chars
-                .saturating_sub(self.turn_stream_chars_measured)
-                / 4;
+            let unmeasured = crate::agent::tokens::chars_to_tokens(
+                self.turn_stream_chars
+                    .saturating_sub(self.turn_stream_chars_measured),
+            );
             let used = self.turn_output_tokens + unmeasured;
             if used > 0 {
                 let approx = if unmeasured > 0 { "~" } else { "" };

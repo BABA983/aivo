@@ -2265,6 +2265,9 @@ pub(super) struct SubagentRow {
     pub(super) started: Instant,
     /// Last gated tool auto-denied for this delegate.
     pub(super) denied: Option<String>,
+    /// Latest output-token estimate, summed into the footer's turn total
+    /// (`done` pins the final value here; the row itself renders `done` only).
+    pub(super) live_tokens: u64,
     /// (produced an answer, steps, tokens, runtime) once finished.
     pub(super) done: Option<(bool, usize, u64, std::time::Duration)>,
 }
@@ -2441,6 +2444,10 @@ pub(super) enum RuntimeEvent {
     AgentSubDenied {
         slot: usize,
         tool: String,
+    },
+    AgentSubTokens {
+        slot: usize,
+        tokens: u64,
     },
     /// A parallel delegate finished (`ok` = it produced an answer).
     AgentSubDone {
@@ -2676,6 +2683,8 @@ pub(super) struct CodeTuiApp {
     /// Live rows under the spinner for a parallel sub-agent batch (slot-indexed);
     /// cleared on batch finish / turn end.
     pub(super) subagent_rows: Vec<SubagentRow>,
+    /// Parent turn tokens at batch start; slot totals sum on top.
+    pub(super) subagent_token_base: u64,
     /// Streaming tail of the in-flight `run_bash`; cleared when the tool returns.
     pub(super) tool_output_tail: std::collections::VecDeque<String>,
     /// Unterminated last line of the stream (rendered too, for progress output).
@@ -3252,6 +3261,7 @@ impl CodeTuiApp {
             wait_tick: None,
             last_stream_activity: None,
             subagent_rows: Vec::new(),
+            subagent_token_base: 0,
             tool_output_tail: std::collections::VecDeque::new(),
             tool_output_partial: String::new(),
             turn_output_tokens: 0,

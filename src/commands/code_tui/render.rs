@@ -3904,6 +3904,7 @@ mod render_tests {
             step: 4,
             started: Instant::now(),
             denied: None,
+            live_tokens: 0,
             done: None,
         };
         let text = subagent_row_text(&row);

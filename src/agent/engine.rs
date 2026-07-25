@@ -117,6 +117,8 @@ pub trait SubagentSink: Send + Sync {
     fn activity(&self, slot: usize, agent: &str, tool: &str, args: &Value, step: usize);
     /// A gated call was auto-denied (no interactive approval mid-batch).
     fn denied(&self, slot: usize, tool: &str);
+    /// Live output-token estimate for a slot (measured, plus streamed chars since).
+    fn tokens(&self, slot: usize, output: u64);
     /// `ok` = the delegate produced an answer.
     fn done(&self, slot: usize, ok: bool, steps: usize, tokens: u64);
     fn finish(&self);

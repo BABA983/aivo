@@ -420,6 +420,7 @@ impl CodeTuiApp {
         self.turn_output_tokens = 0;
         self.turn_stream_chars = 0;
         self.turn_stream_chars_measured = 0;
+        self.subagent_token_base = 0;
         self.retrying = false;
         // Fresh stall clock — a stale stamp would flag a "stall" at turn start.
         self.last_stream_activity = Some(Instant::now());
@@ -1150,6 +1151,7 @@ impl CodeTuiApp {
         self.turn_output_tokens = 0;
         self.turn_stream_chars = 0;
         self.turn_stream_chars_measured = 0;
+        self.subagent_token_base = 0;
         self.compact_before = Some(before);
         self.response_task = Some(tokio::spawn(async move {
             let client = crate::services::http_utils::router_http_client();
@@ -3855,6 +3857,15 @@ impl crate::agent::engine::SubagentSink for ChatSubagentSink {
             .send(RuntimeEvent::AgentSubDenied {
                 slot,
                 tool: tool.to_string(),
+            })
+            .ok();
+    }
+
+    fn tokens(&self, slot: usize, output: u64) {
+        self.tx
+            .send(RuntimeEvent::AgentSubTokens {
+                slot,
+                tokens: output,
             })
             .ok();
     }

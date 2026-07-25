@@ -175,6 +175,12 @@ pub(crate) fn estimate_str_tokens(s: &str) -> usize {
     total
 }
 
+/// Flat ruler for live streaming counters that only track a byte count.
+/// Prefer `estimate_str_tokens` when the text itself is in hand.
+pub(crate) fn chars_to_tokens(chars: u64) -> u64 {
+    chars / 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

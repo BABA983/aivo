@@ -663,6 +663,26 @@ fn test_cursor_task_notice_renames_generic_batch_rows() {
 }
 
 #[test]
+fn test_parallel_subagent_tokens_fold_into_status_tail() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    app.turn_output_tokens = 200;
+    app.apply_subagent_begin(vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(app.subagent_token_base, 200);
+    app.apply_subagent_tokens(0, 50);
+    app.apply_subagent_tokens(1, 80);
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(plain.contains("330 tokens"), "base+sum of slots: {plain:?}");
+    app.apply_subagent_done(0, true, 3, 90);
+    let plain = app.build_transcript().plain_lines.join("\n");
+    assert!(
+        plain.contains("370 tokens"),
+        "done tokens replace live for that slot: {plain:?}"
+    );
+}
+
+#[test]
 fn test_status_tail_shows_turn_output_tokens() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
