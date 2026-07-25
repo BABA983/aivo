@@ -1052,6 +1052,24 @@ pub fn body_requests_vision(body: &Value) -> bool {
     })
 }
 
+/// Rewrites `role: "developer"` to `"system"` in a Chat Completions body.
+///
+/// OpenAI-ecosystem clients (codex, pi, …) send the system prompt as
+/// `developer` for reasoning models. Only OpenAI accepts that role — and
+/// documents it as equivalent to `system` — while other chat upstreams
+/// (DeepSeek, vLLM relays, …) 400 on it. The protocol-conversion bridges
+/// already map it; this covers the verbatim chat passthroughs.
+pub fn normalize_developer_role_to_system(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) == Some("developer") {
+            msg["role"] = Value::String("system".to_string());
+        }
+    }
+}
+
 /// Detects `X-Initiator` value from an OpenAI Chat Completions body.
 /// Returns `"user"` for genuine user messages, `"agent"` for tool/assistant follow-ups.
 pub fn copilot_initiator_from_openai(body: &Value) -> &'static str {
@@ -1074,6 +1092,27 @@ pub fn copilot_initiator_from_openai(body: &Value) -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn normalize_developer_role_rewrites_only_developer() {
+        let mut body = json!({"messages": [
+            {"role": "developer", "content": "be helpful"},
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"}
+        ]});
+        normalize_developer_role_to_system(&mut body);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][2]["role"], "assistant");
+    }
+
+    #[test]
+    fn normalize_developer_role_without_messages_is_noop() {
+        let mut body = json!({"model": "m", "input": "responses-style"});
+        let before = body.clone();
+        normalize_developer_role_to_system(&mut body);
+        assert_eq!(body, before);
+    }
 
     #[tokio::test]
     async fn bind_concrete_ephemeral_binds_reachable_nonzero_port() {

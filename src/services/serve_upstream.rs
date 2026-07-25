@@ -315,6 +315,7 @@ pub(crate) async fn send_openai_chat(
     context: &UpstreamRequestContext,
 ) -> Result<RouterResponse> {
     normalize_openai_request_model(body, context.is_openrouter, context.is_copilot);
+    http_utils::normalize_developer_role_to_system(body);
     migrate_max_tokens_for_reasoning_models(body);
     strip_non_function_tools(body);
     inject_include_usage_for_accounting(body, context.accounting);

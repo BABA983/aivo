@@ -1014,6 +1014,7 @@ impl EnvironmentInjector {
                 model,
                 catalog,
                 limits,
+                true,
             );
             env.insert(AIVO_ROUTER_AUTH_TOKEN.to_string(), loopback_token);
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
@@ -1034,6 +1035,7 @@ impl EnvironmentInjector {
                 model,
                 catalog,
                 limits,
+                true,
             );
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
             env.insert("AIVO_SETUP_PI_AGENT_DIR".to_string(), "1".to_string());
@@ -1047,6 +1049,7 @@ impl EnvironmentInjector {
                 model,
                 catalog,
                 limits,
+                true,
             );
             env.insert(AIVO_ROUTER_AUTH_TOKEN.to_string(), loopback_token);
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
@@ -1063,6 +1066,7 @@ impl EnvironmentInjector {
                 model,
                 catalog,
                 limits,
+                true,
             );
             env.insert(AIVO_ROUTER_AUTH_TOKEN.to_string(), loopback_token);
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
@@ -1090,6 +1094,7 @@ impl EnvironmentInjector {
                 model,
                 catalog,
                 limits,
+                true,
             );
             env.insert(AIVO_ROUTER_AUTH_TOKEN.to_string(), loopback_token);
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
@@ -1139,7 +1144,7 @@ impl EnvironmentInjector {
                 &key.key
             };
             let models_json =
-                build_pi_models_json(&resolved_url, auth, pi_api, model, catalog, limits);
+                build_pi_models_json(&resolved_url, auth, pi_api, model, catalog, limits, false);
             env.insert("AIVO_PI_MODELS_JSON".to_string(), models_json);
             env.insert("AIVO_SETUP_PI_AGENT_DIR".to_string(), "1".to_string());
         }
@@ -1183,6 +1188,16 @@ fn strip_aivo_prefix(model: &str) -> &str {
 ///
 /// Pi reads `models.json` from `PI_CODING_AGENT_DIR` to discover custom providers.
 /// The placeholder URL `http://127.0.0.1:0` is patched at runtime with the actual router port.
+///
+/// `pin_system_role`: pi sniffs provider quirks from the baseUrl (detectCompat
+/// in its openai-completions driver). Pass `true` whenever the URL hides the
+/// real upstream (aivo's loopback routers, ollama) — pi then assumes
+/// OpenAI-proper and sends the system prompt as `role: "developer"` for
+/// reasoning models, which non-OpenAI upstreams reject (DeepSeek 400s).
+/// Pinning `supportsDeveloperRole: false` forces the universally-accepted
+/// `system` role; OpenAI itself treats the two as equivalent, so nothing is
+/// lost. Pass `false` for direct connections, where pi's own detection is
+/// authoritative (`--transparent` parity).
 fn build_pi_models_json(
     base_url: &str,
     api_key: &str,
@@ -1190,6 +1205,7 @@ fn build_pi_models_json(
     model: Option<&str>,
     catalog: &[String],
     limits: &HashMap<String, crate::services::model_metadata::ResolvedLimits>,
+    pin_system_role: bool,
 ) -> String {
     // Pi doesn't auto-discover — its `/model` picker shows only what's listed
     // here. List the whole catalog so it's a real picker. The pinned id stays
@@ -1229,7 +1245,7 @@ fn build_pi_models_json(
             entry
         })
         .collect();
-    let models_json = json!({
+    let mut models_json = json!({
         "providers": {
             "aivo": {
                 "baseUrl": base_url,
@@ -1239,6 +1255,9 @@ fn build_pi_models_json(
             }
         }
     });
+    if pin_system_role {
+        models_json["providers"]["aivo"]["compat"] = json!({ "supportsDeveloperRole": false });
+    }
     models_json.to_string()
 }
 
@@ -3685,6 +3704,34 @@ mod tests {
 
         assert_eq!(env.get("AIVO_SETUP_PI_AGENT_DIR"), Some(&"1".to_string()));
         assert!(!env.contains_key("AIVO_USE_PI_ROUTER"));
+    }
+
+    #[test]
+    fn test_for_pi_pins_system_role_only_when_routed() {
+        let _guard = crate::services::http_debug::DEBUG_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let injector = EnvironmentInjector::new();
+        let key = test_api_key("https://api.deepseek.com");
+        let pi_models = |env: &HashMap<String, String>| -> Value {
+            serde_json::from_str(env.get("AIVO_PI_MODELS_JSON").unwrap()).unwrap()
+        };
+
+        // Routed through the loopback pi can't sniff the real upstream, so
+        // models.json must pin the `system` role (DeepSeek 400s on `developer`).
+        crate::services::http_debug::set_test_debug_active(true);
+        let env = injector.for_pi(&key, Some("deepseek-v4-flash"), &[], &HashMap::new());
+        assert_eq!(
+            pi_models(&env)["providers"]["aivo"]["compat"]["supportsDeveloperRole"],
+            Value::Bool(false)
+        );
+
+        // Direct (--transparent parity): pi sees the real URL and its own
+        // quirk detection is authoritative — no compat override.
+        crate::services::http_debug::set_test_debug_active(false);
+        crate::services::transform_mode::set_active(false);
+        let env = injector.for_pi(&key, Some("deepseek-v4-flash"), &[], &HashMap::new());
+        assert!(pi_models(&env)["providers"]["aivo"].get("compat").is_none());
     }
 
     #[test]

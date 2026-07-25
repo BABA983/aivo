@@ -1223,6 +1223,7 @@ fn prepare_chat_completions_body(
 ) -> Value {
     let mut body = body.clone();
     filter_tools(&mut body);
+    http_utils::normalize_developer_role_to_system(&mut body);
     apply_max_tokens_cap_to_fields(
         &mut body,
         config.max_tokens_cap,
