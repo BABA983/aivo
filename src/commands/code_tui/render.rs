@@ -723,11 +723,20 @@ fn push_reasoning_line(lines: &mut Vec<StyledLine>, text: &str, marker: Option<&
 
 /// Pre-wrap to the content width less the 2-col marker, so wrapped rows hang
 /// indented under the marker instead of the transcript wrapper breaking them flush.
+/// `wrap_styled_line` (not `wrap_chars`) so spaceless CJK runs hard-break.
 fn wrapped_reasoning_rows(reasoning: &str, width: u16) -> Vec<String> {
-    let wrap_w = usize::from(width).saturating_sub(2).max(1);
-    normalized_reasoning_lines(reasoning)
-        .iter()
-        .flat_map(|line| super::overlay_render_impl::wrap_chars(line, wrap_w))
+    let lines = normalized_reasoning_lines(reasoning);
+    let wrap_w = usize::from(width).saturating_sub(2);
+    if wrap_w < 2 {
+        return lines; // width 0 before the first frame; the paint-time wrapper sizes them
+    }
+    lines
+        .into_iter()
+        .flat_map(|line| {
+            wrap_styled_line(&[Span::raw(line)], wrap_w)
+                .into_iter()
+                .map(|sl| sl.plain)
+        })
         .collect()
 }
 

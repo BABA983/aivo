@@ -134,6 +134,42 @@ directory. I should check git status and recent git log."
 }
 
 #[test]
+fn test_cjk_thinking_wraps_with_hang_indent() {
+    // Spaceless CJK has no word breaks, so word-only wrapping overflows and the
+    // paint-time re-wrap hangs continuations under `✻` instead of under the text.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.thinking_enabled = true;
+    app.transcript_width = 46;
+    app.history.push(ChatMessage {
+        model: None,
+        role: "assistant".to_string(),
+        content: "你好！很高兴见到你。".to_string(),
+        reasoning_content: Some("思".repeat(50)),
+        attachments: vec![],
+    });
+    app.transcript_revision = app.transcript_revision.wrapping_add(1);
+    let full = app.build_transcript();
+    let wrapped = wrap_transcript(&full.lines, &full.bar_colors, app.transcript_width);
+    let think: Vec<&String> = wrapped.rows.iter().filter(|r| r.contains('思')).collect();
+    assert!(
+        think.len() >= 2,
+        "the thought wrapped to multiple rows: {think:?}"
+    );
+    assert!(
+        think[0].starts_with("  ✻ 思"),
+        "first row carries the nested marker: {:?}",
+        think[0]
+    );
+    for row in &think[1..] {
+        assert!(
+            row.starts_with("    思"),
+            "wrapped CJK row must hang-indent under the text: {row:?}"
+        );
+    }
+}
+
+#[test]
 fn test_build_transcript_hides_streaming_reasoning_when_disabled() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
