@@ -804,7 +804,7 @@
     "gpt-oss-120b-fast": [8000,8192,"trd","low,medium,high",0.1,0.5,0.01,0.125],
     "gpt-oss-120b-high-throughput": [131072,16384,"tr","low,medium,high",0.09,0.36,null,null],
     "gpt-oss-120b-maas": [131072,32768,"tr","low,medium,high",0.09,0.36,null,null],
-    "gpt-oss-20b": [131072,32768,"trai","low,medium,high",0,0,0.035,0.06],
+    "gpt-oss-20b": [131072,32768,"trai","low,medium,high",0,0,0.03,0.06],
     "gpt-oss-20b-maas": [131072,32768,"trd","low,medium,high",0.07,0.25,null,null],
     "gpt-oss-safeguard-120b": [131000,32768,"tr","low,medium,high",0.15,0.6,null,null],
     "gpt-oss-safeguard-20b": [131072,65536,"tr","low,medium,high",0.075,0.3,0.037,null],
