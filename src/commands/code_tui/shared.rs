@@ -333,6 +333,7 @@ pub(super) const WELCOME_TIPS: &[&str] = &[
     "Shift+Tab cycles mode: normal → auto → plan → review",
     "/rewind undoes the agent's file edits",
     "/goal <task> keeps working on its own until it's done",
+    "Esc interrupts the agent mid-turn — in /goal mode, press Esc twice",
     "Ctrl+R reopens a past session",
     "/share creates a live web link to this session",
     "/effort changes how hard the model thinks",

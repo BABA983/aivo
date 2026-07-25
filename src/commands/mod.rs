@@ -18,6 +18,22 @@ pub(crate) fn print_no_model_list_hint() {
     eprintln!("  {} {}", style::dim("note:"), NO_MODEL_LIST_HINT);
 }
 
+/// Call to action for the zero-keys state: how to add a key, including the
+/// free starter (which stays restorable this way after being dismissed).
+pub(crate) fn add_key_cta() -> String {
+    format!(
+        "Run {} to add one, or {} for the free starter key (no signup needed).",
+        style::cyan("aivo keys add"),
+        style::cyan("aivo keys add aivo-starter")
+    )
+}
+
+/// Standard "no key configured" error block for launch paths, to stderr.
+pub(crate) fn print_no_key_error() {
+    eprintln!("{} No API key configured.", style::red("Error:"));
+    eprintln!("  {}", add_key_cta());
+}
+
 pub(crate) use crate::services::http_utils::normalize_base_url;
 
 /// Truncates `text` to its first line, then to `max_cols` terminal columns

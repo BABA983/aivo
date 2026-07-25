@@ -32,6 +32,32 @@ struct Resolved<T> {
     interactive: bool,
 }
 
+/// Marker error for a user-cancelled picker: `execute` renders it as the
+/// standard dim "Cancelled." notice with exit 0 — backing out isn't an error
+/// (same contract as the keys/login flows and the run-path pickers).
+#[derive(Debug)]
+struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Cancelled.")
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// No-key launch failure: auth exit code (3), matching `code`/`serve`/`models`,
+/// with the standard add-key CTA.
+fn no_key_error() -> anyhow::Error {
+    crate::errors::CLIError::new(
+        "No API key configured.",
+        crate::errors::ErrorCategory::Auth,
+        None::<String>,
+        Some(crate::commands::add_key_cta()),
+    )
+    .into()
+}
+
 /// A picked launch target: a native tool, aivo's chat agent, or a plugin.
 enum StartTool {
     Native(AIToolType),
@@ -67,6 +93,10 @@ impl StartCommand {
     pub async fn execute(&self, args: StartFlowArgs) -> ExitCode {
         match self.execute_internal(args).await {
             Ok(code) => code,
+            Err(e) if e.is::<Cancelled>() => {
+                eprintln!("{}", style::dim("Cancelled."));
+                ExitCode::Success
+            }
             Err(e) => {
                 eprintln!("{} {}", style::red("Error:"), e);
                 crate::errors::exit_code_for_error(&e)
@@ -232,7 +262,7 @@ impl StartCommand {
                         let prompt = format!("Select key '{}'", key_id_or_name);
                         match prompt_pick_key_without_activation(&matches, &[], &prompt, 0)? {
                             Some(key) => key,
-                            None => anyhow::bail!("Cancelled."),
+                            None => return Err(Cancelled.into()),
                         }
                     }
                 }
@@ -263,7 +293,7 @@ impl StartCommand {
 
         let keys = self.session_store.get_keys().await?;
         match keys.len() {
-            0 => anyhow::bail!("No API key configured. Run 'aivo keys add' first."),
+            0 => Err(no_key_error()),
             1 => {
                 let mut key = keys[0].clone();
                 SessionStore::decrypt_key_secret(&mut key)?;
@@ -277,7 +307,7 @@ impl StartCommand {
                     value: key,
                     interactive: true,
                 }),
-                None => Err(anyhow::anyhow!("Cancelled")),
+                None => Err(Cancelled.into()),
             },
         }
     }
@@ -288,7 +318,7 @@ impl StartCommand {
     ) -> Result<Resolved<ApiKey>> {
         let keys = self.session_store.get_keys().await?;
         match keys.len() {
-            0 => anyhow::bail!("No API key configured. Run 'aivo keys add' first."),
+            0 => Err(no_key_error()),
             1 => {
                 let mut key = keys[0].clone();
                 SessionStore::decrypt_key_secret(&mut key)?;
@@ -316,7 +346,7 @@ impl StartCommand {
                         value: key,
                         interactive: true,
                     }),
-                    None => Err(anyhow::anyhow!("Cancelled")),
+                    None => Err(Cancelled.into()),
                 }
             }
         }
@@ -378,7 +408,7 @@ impl StartCommand {
             .interact_opt()
             .ok()
             .flatten()
-            .ok_or_else(|| anyhow::anyhow!("Cancelled"))?;
+            .ok_or(Cancelled)?;
         Ok(Resolved {
             value: parse(&entries[selected].0).expect("picker items are parseable"),
             interactive: true,
@@ -576,7 +606,7 @@ impl StartCommand {
                 value: Some(selected),
                 interactive: true,
             }),
-            None => Err(anyhow::anyhow!("Cancelled")),
+            None => Err(Cancelled.into()),
         }
     }
 }

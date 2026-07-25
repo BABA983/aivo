@@ -371,7 +371,10 @@ impl RunCommand {
                 )
                 .await?;
             match outcome {
-                ModelOutcome::Cancelled => return Ok(ExitCode::Success),
+                ModelOutcome::Cancelled => {
+                    eprintln!("{}", style::dim("Cancelled."));
+                    return Ok(ExitCode::Success);
+                }
                 ModelOutcome::Model(m) => Some(m),
                 ModelOutcome::UseDefault => None,
             }
@@ -407,7 +410,10 @@ impl RunCommand {
                     .await?
                 {
                     Some(o) => o,
-                    None => return Ok(ExitCode::Success),
+                    None => {
+                        eprintln!("{}", style::dim("Cancelled."));
+                        return Ok(ExitCode::Success);
+                    }
                 }
             }
             AIToolType::Claude => ClaudeModelOverrides::default(),

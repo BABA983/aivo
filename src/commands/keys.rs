@@ -1160,6 +1160,7 @@ impl KeysCommand {
 
         if keys.is_empty() {
             println!("{}", style::dim("No API keys found."));
+            println!("  {}", crate::commands::add_key_cta());
             return Ok(ExitCode::Success);
         }
 
@@ -1208,6 +1209,7 @@ impl KeysCommand {
 
         if keys.is_empty() {
             println!("{}", style::dim("No API keys found."));
+            println!("  {}", crate::commands::add_key_cta());
             return Ok(ExitCode::Success);
         }
 
@@ -1287,6 +1289,7 @@ impl KeysCommand {
 
         if keys.is_empty() {
             println!("{}", style::dim("No API keys found."));
+            println!("  {}", crate::commands::add_key_cta());
             return Ok(ExitCode::Success);
         }
 
@@ -3287,6 +3290,7 @@ impl KeysCommand {
 
         if all_keys.is_empty() {
             println!("{}", style::dim(empty_message));
+            println!("  {}", crate::commands::add_key_cta());
             return Ok(KeySelection::Empty);
         }
 

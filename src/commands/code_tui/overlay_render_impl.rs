@@ -1769,6 +1769,7 @@ impl CodeTuiApp {
                 ("^A", "add"),
                 ("^D", "rm"),
                 ("^O", "auth"),
+                ("^X", "logout"),
                 ("^R", "retry"),
                 ("^T", "tools"),
             ];

@@ -541,10 +541,7 @@ impl CodeCommand {
                     None => match self.session_store.get_active_key().await? {
                         Some(k) => k,
                         None => {
-                            eprintln!(
-                                "{} No API key configured. Run 'aivo keys add' first.",
-                                style::red("Error:")
-                            );
+                            crate::commands::print_no_key_error();
                             return Ok(ExitCode::AuthError);
                         }
                     },

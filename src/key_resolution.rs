@@ -137,7 +137,7 @@ async fn prompt_temporary_key_override(
     if all_keys.is_empty() {
         eprintln!("{} No API keys configured.", style::yellow("Note:"));
         eprintln!();
-        eprintln!("  Run {} to add one.", style::cyan("aivo keys add"));
+        eprintln!("  {}", crate::commands::add_key_cta());
         return Ok(KeyResolution::MissingAuth);
     }
     if !crate::tui::picker_interactive() {
@@ -206,7 +206,7 @@ async fn resolve_active_key_or_prompt(
     if all_keys.is_empty() {
         eprintln!("{} No API keys configured.", style::yellow("Note:"));
         eprintln!();
-        eprintln!("  Run {} to add one.", style::cyan("aivo keys add"));
+        eprintln!("  {}", crate::commands::add_key_cta());
         return None;
     }
 
