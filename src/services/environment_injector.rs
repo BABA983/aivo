@@ -1210,7 +1210,9 @@ fn build_pi_models_json(
     rest.dedup();
     // Pi assumes 128k context for models without an explicit contextWindow;
     // carry the resolved limits so its footer and compaction math match the
-    // real model.
+    // real model. Also advertise `reasoning` — custom providers default to
+    // `reasoning: false`, which makes pi clamp `--thinking` to `off` and omit
+    // `reasoning_effort` entirely.
     let models: Vec<Value> = std::iter::once(default_id)
         .chain(rest)
         .map(|id| {
@@ -1222,6 +1224,7 @@ fn build_pi_models_json(
                 if let Some(output) = l.output {
                     entry["maxTokens"] = json!(output);
                 }
+                apply_pi_reasoning_fields(&mut entry, l);
             }
             entry
         })
@@ -1237,6 +1240,49 @@ fn build_pi_models_json(
         }
     });
     models_json.to_string()
+}
+
+/// Set pi's `reasoning` / `thinkingLevelMap` from resolved catalog limits.
+///
+/// Pi only sends `reasoning_effort` when `model.reasoning` is true; without a
+/// map entry, `xhigh`/`max` are also filtered out of the thinking cycle.
+fn apply_pi_reasoning_fields(
+    entry: &mut Value,
+    limits: &crate::services::model_metadata::ResolvedLimits,
+) {
+    let reasoning = !limits.reasoning_efforts.is_empty()
+        || limits.caps.is_some_and(|c| c.reasoning);
+    if !reasoning {
+        return;
+    }
+    entry["reasoning"] = json!(true);
+    if let Some(map) = pi_thinking_level_map(&limits.reasoning_efforts) {
+        entry["thinkingLevelMap"] = map;
+    }
+}
+
+/// Map catalog-advertised effort levels onto pi's `thinkingLevelMap`.
+///
+/// - `off` → `"none"` when the catalog uses OpenAI's off spelling
+/// - self-map every advertised level so `xhigh`/`max` become selectable
+/// - set unadvertised `minimal` to `null` so pi won't offer values that 400
+fn pi_thinking_level_map(efforts: &[String]) -> Option<Value> {
+    if efforts.is_empty() {
+        return None;
+    }
+    let has = |level: &str| efforts.iter().any(|e| e == level);
+    let mut map = serde_json::Map::new();
+    if has("none") {
+        map.insert("off".into(), json!("none"));
+    }
+    for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+        if has(level) {
+            map.insert(level.to_string(), json!(level));
+        } else if level == "minimal" {
+            map.insert(level.to_string(), Value::Null);
+        }
+    }
+    Some(Value::Object(map))
 }
 
 pub(crate) fn redact_env_value(key: &str, value: &str) -> String {
@@ -3695,10 +3741,96 @@ mod tests {
         assert_eq!(models[0]["id"], "aivo/starter");
         assert_eq!(models[0]["contextWindow"], 1_000_000);
         assert_eq!(models[0]["maxTokens"], 384_000);
+        // Non-reasoning models must not advertise reasoning (pi would send
+        // reasoning_effort and some providers 400).
+        assert!(models[0].get("reasoning").is_none());
+        assert!(models[0].get("thinkingLevelMap").is_none());
         // Unknown models omit the fields so pi's own defaults apply.
         assert_eq!(models[1]["id"], "mystery-model-xyz");
         assert!(models[1].get("contextWindow").is_none());
         assert!(models[1].get("maxTokens").is_none());
+        assert!(models[1].get("reasoning").is_none());
+    }
+
+    #[test]
+    fn test_for_pi_advertises_reasoning_for_reasoning_models() {
+        // Regression: without `reasoning: true`, pi clamps `--thinking high`
+        // to off and never sends `reasoning_effort` for custom aivo models.
+        let _guard = crate::services::http_debug::DEBUG_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::services::http_debug::set_test_debug_active(false);
+        crate::services::transform_mode::set_active(false);
+
+        let injector = EnvironmentInjector::new();
+        let key = test_api_key("https://api.openai.com/v1");
+        let catalog = [
+            "gpt-5.6-sol".to_string(),
+            "plain-chat".to_string(),
+            "flag-only-reasoner".to_string(),
+        ];
+        let mut limits = HashMap::new();
+        limits.insert(
+            "gpt-5.6-sol".to_string(),
+            crate::services::model_metadata::ResolvedLimits {
+                context: Some(1_050_000),
+                output: Some(128_000),
+                caps: None,
+                reasoning_efforts: ["none", "low", "medium", "high", "xhigh", "max"]
+                    .map(String::from)
+                    .to_vec(),
+            },
+        );
+        limits.insert(
+            "plain-chat".to_string(),
+            crate::services::model_metadata::ResolvedLimits {
+                context: Some(128_000),
+                output: Some(8_000),
+                caps: None,
+                reasoning_efforts: Vec::new(),
+            },
+        );
+        // Snapshot-only reasoning flag, no effort list (still must enable).
+        limits.insert(
+            "flag-only-reasoner".to_string(),
+            crate::services::model_metadata::ResolvedLimits {
+                context: Some(200_000),
+                output: Some(64_000),
+                caps: crate::services::model_metadata::snapshot_limits("o3"),
+                reasoning_efforts: Vec::new(),
+            },
+        );
+
+        let env = injector.for_pi(&key, Some("gpt-5.6-sol"), &catalog, &limits);
+        let parsed: Value = serde_json::from_str(env.get("AIVO_PI_MODELS_JSON").unwrap()).unwrap();
+        let models = parsed["providers"]["aivo"]["models"].as_array().unwrap();
+        let by_id = |id: &str| {
+            models
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap_or_else(|| panic!("missing model {id}"))
+        };
+
+        let sol = by_id("gpt-5.6-sol");
+        assert_eq!(sol["reasoning"], true);
+        assert_eq!(sol["thinkingLevelMap"]["off"], "none");
+        assert_eq!(sol["thinkingLevelMap"]["high"], "high");
+        assert_eq!(sol["thinkingLevelMap"]["xhigh"], "xhigh");
+        assert_eq!(sol["thinkingLevelMap"]["max"], "max");
+        // Catalog has no "minimal" → disable so pi won't send a 400-prone value.
+        assert!(sol["thinkingLevelMap"]["minimal"].is_null());
+
+        let plain = by_id("plain-chat");
+        assert!(plain.get("reasoning").is_none());
+        assert!(plain.get("thinkingLevelMap").is_none());
+
+        let flag_only = by_id("flag-only-reasoner");
+        assert_eq!(
+            flag_only["reasoning"], true,
+            "caps.reasoning alone must enable pi reasoning"
+        );
+        // No effort list → no map (pi still offers off/minimal/low/medium/high).
+        assert!(flag_only.get("thinkingLevelMap").is_none());
     }
 
     #[test]
