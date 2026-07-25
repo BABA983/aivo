@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.42.2
+
+A coding-agent usability and performance patch. Zero-key states now offer clearer starter-key actions, picker cancellations behave consistently, and live sharing keeps its URL visible. The code TUI renders faster, reports live token counts for parallel sub-agent batches, improves marker and CJK thinking-row rendering, and keeps status token counts current between measurements. Model metadata and provider handling also get small correctness fixes, including more accurate Pi thinking-level advertisement and preventing an internal role from leaking to non-OpenAI upstreams.
+
+- improve: starter-key CTAs on zero-key states and consistent picker cancels (1bfa2daa)
+- fix(code): keep the share URL visible while sharing is live (f93b208c)
+- perf(code): improve TUI rendering performance (773c026c)
+- feat(code): live token counts for parallel sub-agent batches (a68b87fa)
+- fix(code): make the agent deliberate before decision-carrying builds (3337f834)
+- feat(keys): clearer list labels and add/reauth help (0e9af8c8)
+- fix: stop role "developer" leaking to non-OpenAI chat upstreams (2e65448d)
+- fix(pi): null all unadvertised default thinking levels, not just minimal (02070242)
+- fix(pi): advertise reasoning in models.json so --thinking works (341f5fe9)
+- fix(code): hard-break spaceless CJK thinking rows (f3ec403a)
+- fix(code): improve marker icons (1777ee7f)
+- fix(code): keep the status token count ticking between round measurements (18f2cc85)
+
 ## v0.42.1
 
 A follow-up pass on the coding-agent TUI and reasoning effort. The prompt box is redesigned: the composer closes into a full rounded box with the `❯` caret flush inside its border, and the banner, transcript markers, and composer now share one column, so everything lines up down the left edge. The footer regroups into workspace and engine halves and the auto-approve badge swaps its emoji bolt — which rendered full-color and double-width — for a text-width `↯` that takes the amber style like the other badges. On the effort side, `minimal` is now stripped for gpt-5.1+ reasoning models that reject it, including at snapshot load so a stale override can't resurrect it, and the `/effort` picker opens pre-selected on the level that's actually in effect.
