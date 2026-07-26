@@ -2390,6 +2390,15 @@ mod tests {
     }
 
     #[test]
+    fn apply_selected_model_preserves_anthropic_ids_for_starter() {
+        // Regression: cross-family guard swapped anthropic/* to gpt-4o → gateway 404.
+        let config = test_router_config("https://api.getaivo.dev", vec!["starter".to_string()]);
+        let mut body = json!({"model": "anthropic/claude-opus-5"});
+        apply_selected_model(&mut body, &config, ProviderProtocol::Openai);
+        assert_eq!(body["model"], "anthropic/claude-opus-5");
+    }
+
+    #[test]
     fn apply_selected_model_noop_without_starter_catalog() {
         let config = test_router_config("https://api.example.com", vec![]);
         let mut body = json!({"model": "starter"});

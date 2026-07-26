@@ -8,7 +8,7 @@
 //! This module consolidates the version conversion logic that was previously
 //! duplicated across Anthropic router code, copilot_router, and chat.rs.
 
-use crate::services::provider_profile::is_openrouter_base;
+use crate::services::provider_profile::{is_aivo_starter_base, is_openrouter_base};
 use crate::services::provider_protocol::ProviderProtocol;
 
 /// Converts Claude model version separators from hyphens to dots.
@@ -204,8 +204,9 @@ pub fn should_preserve_cross_protocol_model(
 ) -> bool {
     match infer_model_protocol(model) {
         Some(protocol) if model_family(protocol) != model_family(target_protocol) => {
+            // The starter is a multi-vendor gateway but its URL misses the name heuristic.
             model_family(target_protocol) == ProviderProtocol::Openai
-                && is_gateway_style_endpoint(base_url)
+                && (is_gateway_style_endpoint(base_url) || is_aivo_starter_base(base_url))
         }
         _ => false,
     }
@@ -636,6 +637,20 @@ mod tests {
             ProviderProtocol::Openai
         ));
         assert!(is_gateway_style_endpoint("https://ai-gateway.vercel.sh/v1"));
+    }
+
+    #[test]
+    fn test_should_preserve_cross_protocol_model_for_aivo_starter() {
+        assert!(should_preserve_cross_protocol_model(
+            crate::constants::AIVO_STARTER_REAL_URL,
+            "anthropic/claude-opus-5",
+            ProviderProtocol::Openai
+        ));
+        assert!(should_preserve_cross_protocol_model(
+            crate::constants::AIVO_STARTER_SENTINEL,
+            "google/gemini-2.5-pro",
+            ProviderProtocol::Openai
+        ));
     }
 
     #[test]
