@@ -877,7 +877,7 @@ impl CodeTuiApp {
                 input_line,
                 rows,
                 selected_pos,
-                detail,
+                detail: detail_line(detail, usize::from(list_pane.width).max(1)),
                 footer: body_footer,
             },
         );
@@ -1112,7 +1112,7 @@ impl CodeTuiApp {
                 input_line: search_input_line(&state.query, "filter skills"),
                 rows,
                 selected_pos,
-                detail,
+                detail: detail_line(detail, usize::from(list_pane.width).max(1)),
                 footer: body_footer,
             },
         );
@@ -1148,62 +1148,68 @@ impl CodeTuiApp {
         }
     }
 
-    /// `/config`: one line per setting (name left, switch flush right) with a blank
-    /// between rows and the focused row's description below; shares the `/skills` /
-    /// `/mcp` chrome via [`render_toggle_list`]. Badge counts only on/off switches.
+    /// `/config`: one line per setting, name left and live value flush right.
+    /// Only the focused row spells out its alternatives (the strip under the
+    /// list) — the rest stay a scannable column of values. Shares the
+    /// `/skills` / `/mcp` chrome via [`render_toggle_list`].
     pub(super) fn render_config_overlay(
         &self,
         frame: &mut Frame<'_>,
         area: Rect,
         state: &ConfigOverlay,
     ) {
-        let switches: Vec<ConfigSegments> = state
-            .items
-            .iter()
-            .map(|i| self.config_segments(i.setting))
-            .filter(|s| s.is_switch)
-            .collect();
-        let on = switches.iter().filter(|s| s.active == 0).count();
         let input_line = Line::from(Span::styled(
             "Settings — remembered across sessions",
             Style::default().fg(MUTED()),
         ));
 
-        let inner_width = usize::from(area.width).saturating_sub(6).max(1);
-        let mut rows: Vec<Line> = Vec::new();
-        let mut selected_pos = 0usize;
-        for (pos, item) in state.items.iter().enumerate() {
-            if pos == state.selected {
-                selected_pos = rows.len();
-            }
+        let inner_width = usize::from(area.width).saturating_sub(4).max(1);
+        let rows: Vec<Line> = state
+            .items
+            .iter()
+            .enumerate()
+            .map(|(pos, item)| {
+                let segs = self.config_segments(item.setting);
+                config_value_line(
+                    item.label,
+                    segs.options.get(segs.active).copied().unwrap_or(""),
+                    pos == state.selected,
+                    inner_width,
+                )
+            })
+            .collect();
+
+        let mut detail: Vec<Line> = Vec::new();
+        let mut footer = vec![("↑↓", "move"), ("←→", "change")];
+        if let Some(item) = state.items.get(state.selected) {
             let segs = self.config_segments(item.setting);
-            rows.push(segment_switch_line(
-                item.label,
-                segs.options,
-                segs.active,
-                pos == state.selected,
-                inner_width,
-            ));
-            if pos + 1 < state.items.len() {
-                rows.push(Line::from(""));
+            detail.push(config_options_line(segs.options, segs.active));
+            let mut wrapped = wrap_words(&item.description, inner_width);
+            wrapped.resize(CONFIG_DESC_ROWS, String::new());
+            detail.extend(
+                wrapped
+                    .into_iter()
+                    .map(|line| Line::from(Span::styled(line, Style::default().fg(MUTED())))),
+            );
+            if item.setting == ConfigSetting::VisionFallback
+                && self.vision_fallback
+                    == crate::services::session_store::VisionFallbackMode::Custom
+            {
+                footer.push(("Enter", "pick model"));
             }
         }
-        let detail = state
-            .items
-            .get(state.selected)
-            .map(|i| (i.description.to_string(), MUTED()));
 
         render_toggle_list(
             frame,
             area,
             ToggleListView {
                 title: "Config",
-                badge: count_badge(true, on, switches.len(), "esc"),
+                badge: Some(("esc".to_string(), MUTED())),
                 input_line,
                 rows,
-                selected_pos,
+                selected_pos: state.selected,
                 detail,
-                footer: vec![("↑↓", "move"), ("←→", "change")],
+                footer,
             },
         );
     }
@@ -1265,7 +1271,7 @@ impl CodeTuiApp {
                 input_line,
                 rows,
                 selected_pos,
-                detail: None,
+                detail: Vec::new(),
                 footer: vec![("↑↓", "move"), ("Space", "toggle")],
             },
         );
@@ -1339,7 +1345,7 @@ impl CodeTuiApp {
                 input_line,
                 rows,
                 selected_pos,
-                detail: None,
+                detail: Vec::new(),
                 footer: vec![
                     ("↑↓", "move"),
                     ("Space", "mark"),
@@ -1527,7 +1533,7 @@ impl CodeTuiApp {
                 input_line,
                 rows,
                 selected_pos,
-                detail,
+                detail: detail_line(detail, usize::from(list_pane.width).max(1)),
                 footer: body_footer,
             },
         );
@@ -1820,7 +1826,7 @@ impl CodeTuiApp {
                 input_line,
                 rows,
                 selected_pos,
-                detail,
+                detail: detail_line(detail, usize::from(list_pane.width).max(1)),
                 footer: body_footer,
             },
         );
@@ -2145,8 +2151,9 @@ struct ToggleListView<'a> {
     /// Line index within `rows` to keep on screen, so the list scrolls to follow
     /// the selection (each item spans two lines plus a separator).
     selected_pos: usize,
-    /// One-line detail for the selected item, shown just above the footer.
-    detail: Option<(String, Color)>,
+    /// Detail block for the selected item, shown just above the footer — one
+    /// line for the toggle lists, three for `/config`'s strip + description.
+    detail: Vec<Line<'a>>,
     /// `(key, label)` hints rendered along the footer.
     footer: Vec<(&'a str, &'a str)>,
 }
@@ -2197,12 +2204,11 @@ fn render_toggle_list_body(frame: &mut Frame<'_>, inner: Rect, view: ToggleListV
     if inner.height == 0 {
         return;
     }
-    let width = usize::from(inner.width).max(1);
 
     frame.render_widget(Paragraph::new(view.input_line), Rect { height: 1, ..inner });
 
     let footer_h = u16::from(!view.footer.is_empty());
-    let detail_h = u16::from(view.detail.is_some());
+    let detail_h = (view.detail.len() as u16).min(inner.height.saturating_sub(footer_h));
     // A blank row between the input line and the list when there's room to spare.
     let gap = u16::from(inner.height >= 8);
     let list_area = Rect {
@@ -2219,15 +2225,12 @@ fn render_toggle_list_body(frame: &mut Frame<'_>, inner: Rect, view: ToggleListV
         );
     }
 
-    if let Some((text, color)) = view.detail {
+    if detail_h > 0 {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                truncate_for_display_width(&text, width),
-                Style::default().fg(color),
-            ))),
+            Paragraph::new(Text::from(view.detail)),
             Rect {
-                y: inner.y + inner.height - 1 - footer_h,
-                height: 1,
+                y: inner.y + inner.height - detail_h - footer_h,
+                height: detail_h,
                 ..inner
             },
         );
@@ -2248,6 +2251,20 @@ fn render_toggle_list_body(frame: &mut Frame<'_>, inner: Rect, view: ToggleListV
 
 fn render_footer_hints(frame: &mut Frame<'_>, area: Rect, hints: &[(&str, &str)]) {
     frame.render_widget(Paragraph::new(footer_hints(hints)), area);
+}
+
+/// A toggle list's one-line detail; truncated here because the body clips
+/// rather than wraps.
+fn detail_line(detail: Option<(String, Color)>, width: usize) -> Vec<Line<'static>> {
+    detail
+        .map(|(text, color)| {
+            Line::from(Span::styled(
+                truncate_for_display_width(&text, width),
+                Style::default().fg(color),
+            ))
+        })
+        .into_iter()
+        .collect()
 }
 
 /// The `│` divider between a split overlay's panes, centered in its gutter rect.
@@ -2332,58 +2349,65 @@ fn toggle_list_rows(
     }
 }
 
-/// The segmented switch for one `/config` row: `active` in bold accent, the rest
-/// muted. Only the focused row carries a background (the selection bar).
-fn segment_strip(options: &[&str], active: usize, selected: bool) -> Vec<Span<'static>> {
-    options
-        .iter()
-        .enumerate()
-        .map(|(i, opt)| {
-            let style = if selected {
-                let base = Style::default().bg(SELECT_BG());
-                if i == active {
-                    base.fg(ACCENT()).add_modifier(Modifier::BOLD)
-                } else {
-                    base.fg(SELECT_ACCENT())
-                }
-            } else if i == active {
+/// Description lines under the `/config` list — fits the longest one, and is
+/// constant so moving the selection can't resize the box.
+const CONFIG_DESC_ROWS: usize = 2;
+
+/// The focused `/config` row's options, active in bold accent — the only place
+/// the alternatives are visible.
+fn config_options_line(options: &[&str], active: usize) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, opt) in options.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            (*opt).to_string(),
+            if i == active {
                 Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(MUTED())
-            };
-            Span::styled(format!(" {opt} "), style)
-        })
-        .collect()
+            },
+        ));
+    }
+    Line::from(spans)
 }
 
-/// One `/config` line: bold name left, switch flush right, the filled gap
-/// carrying the selection bar on the focused row.
-fn segment_switch_line(
-    name: &str,
-    options: &[&str],
-    active: usize,
-    selected: bool,
-    width: usize,
-) -> Line<'static> {
-    let strip = segment_strip(options, active, selected);
-    let strip_w: usize = options.iter().map(|o| display_width(o) + 2).sum();
-    let (name_style, bar) = if selected {
+/// One `/config` line: bold name left, live value flush right, the filled gap
+/// carrying the selection bar on the focused row. `off` stays muted so a
+/// disabled setting can't read as lit up.
+fn config_value_line(name: &str, value: &str, selected: bool, width: usize) -> Line<'static> {
+    let live = if value == "off" { MUTED() } else { ACCENT() };
+    let (name_style, value_style, bar) = if selected {
         let bar = Style::default().bg(SELECT_BG());
-        (bar.fg(SELECT_TEXT()).add_modifier(Modifier::BOLD), bar)
+        let value_fg = if value == "off" {
+            SELECT_ACCENT()
+        } else {
+            live
+        };
+        (
+            bar.fg(SELECT_TEXT()).add_modifier(Modifier::BOLD),
+            bar.fg(value_fg).add_modifier(Modifier::BOLD),
+            bar,
+        )
     } else {
         (
             Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
+            Style::default().fg(live).add_modifier(Modifier::BOLD),
             Style::default(),
         )
     };
-    let name_room = width.saturating_sub(strip_w + 1).max(1);
+    // +1: a trailing column so the value never touches the bar's edge.
+    let value_w = display_width(value) + 1;
+    let name_room = width.saturating_sub(value_w + 1).max(1);
     let name_disp = truncate_for_display_width(name, name_room);
-    let pad = width.saturating_sub(display_width(&name_disp) + strip_w);
+    let pad = width.saturating_sub(display_width(&name_disp) + value_w);
     let mut spans = vec![Span::styled(name_disp, name_style)];
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bar));
     }
-    spans.extend(strip);
+    spans.push(Span::styled(value.to_string(), value_style));
+    spans.push(Span::styled(" ", bar));
     Line::from(spans)
 }
 

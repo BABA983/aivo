@@ -435,6 +435,60 @@ async fn config_row_description_shows_current_describer() {
     assert!(row.description.contains("glm-4.6v"), "{}", row.description);
 }
 
+/// The vision row is the only one with a drill-in, and the only description
+/// long enough to wrap.
+#[tokio::test]
+async fn config_vision_row_wraps_description_and_advertises_enter() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.open_config_overlay();
+    if let Overlay::Config(state) = &mut app.overlay {
+        state.selected = state
+            .items
+            .iter()
+            .position(|i| i.setting == ConfigSetting::VisionFallback)
+            .unwrap();
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("a key + model"),
+        "description clipped:\n{text}"
+    );
+    // gateway is live, so Enter cycles rather than re-picking — no drill-in hint.
+    assert!(!text.contains("pick model"), "stale Enter hint:\n{text}");
+
+    app.vision_fallback = VisionFallbackMode::Custom;
+    app.vision_fallback_custom = Some(("k1".to_string(), "glm-4.6v".to_string()));
+    terminal.draw(|frame| app.render(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("pick model"),
+        "custom needs the Enter hint:\n{text}"
+    );
+}
+
 #[tokio::test]
 async fn config_reverse_cycle_and_row_wrap() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

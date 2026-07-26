@@ -433,41 +433,54 @@ async fn test_config_approval_radio_is_mutually_exclusive() {
 }
 
 #[tokio::test]
-async fn config_overlay_renders_segmented_switches() {
+async fn config_overlay_renders_live_values_and_focused_options() {
     use ratatui::backend::TestBackend;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
+    app.thinking_enabled = true;
     app.open_config_overlay();
 
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| app.render(frame)).unwrap();
-    let buffer = terminal.backend().buffer();
-    let text: String = (0..buffer.area.height)
-        .map(|y| {
-            (0..buffer.area.width)
-                .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let render = |app: &mut CodeTuiApp| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
-    // Every segment of every switch is visible inline — not just the active value.
-    for label in [
-        "dark",
-        "light",
-        "on",
-        "off",
-        "normal",
-        "auto-approve",
-        "review",
-    ] {
-        assert!(text.contains(label), "segment {label:?} missing:\n{text}");
+    // Theme focused: live values everywhere, alternatives only on that row.
+    let text = render(&mut app);
+    for label in ["Theme", "Mode", "dark", "light", "normal", "gateway"] {
+        assert!(text.contains(label), "{label:?} missing:\n{text}");
     }
-    // The footer advertises ←→ as the way to change a value.
+    for hidden in ["review", "auto-approve"] {
+        assert!(!text.contains(hidden), "{hidden:?} leaked:\n{text}");
+    }
+    assert!(
+        !text.contains("on · esc"),
+        "count badge still drawn:\n{text}"
+    );
     assert!(
         text.contains("change"),
         "footer missing change hint:\n{text}"
     );
+
+    let Overlay::Config(state) = &mut app.overlay else {
+        panic!("expected config overlay");
+    };
+    while state.items[state.selected].setting != ConfigSetting::Approval {
+        state.select_next();
+    }
+    let text = render(&mut app);
+    for label in ["normal", "auto-approve", "review"] {
+        assert!(text.contains(label), "option {label:?} missing:\n{text}");
+    }
 }
 
 #[tokio::test]

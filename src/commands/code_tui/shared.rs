@@ -1366,8 +1366,6 @@ pub(super) enum CycleDir {
 pub(super) struct ConfigSegments {
     pub(super) options: &'static [&'static str],
     pub(super) active: usize,
-    /// A plain on/off switch — the only rows counted in the header badge.
-    pub(super) is_switch: bool,
 }
 
 /// One `/config` row: a labelled preference with a one-line description.

@@ -715,7 +715,6 @@ is preserved."
         let switch = |on: bool| ConfigSegments {
             options: ON_OFF,
             active: if on { 0 } else { 1 },
-            is_switch: true,
         };
         match setting {
             ConfigSetting::Theme => ConfigSegments {
@@ -724,7 +723,6 @@ is preserved."
                     UiTheme::Dark => 0,
                     UiTheme::Light => 1,
                 },
-                is_switch: false,
             },
             ConfigSetting::Thinking => switch(self.thinking_enabled),
             ConfigSetting::Approval => {
@@ -734,7 +732,6 @@ is preserved."
                 ConfigSegments {
                     options: OPTIONS,
                     active: OPTIONS.iter().position(|o| *o == label).unwrap_or(0),
-                    is_switch: false,
                 }
             }
             ConfigSetting::UseWebSearch => switch(self.web_search_enabled),
@@ -747,7 +744,6 @@ is preserved."
                         .iter()
                         .position(|o| *o == self.vision_fallback.as_str())
                         .unwrap_or(0),
-                    is_switch: false,
                 }
             }
         }

@@ -1424,14 +1424,16 @@ impl CodeTuiApp {
             }
             Overlay::Config(config) => {
                 // Content-sized box; width capped, not a percentage, so a wide
-                // terminal doesn't fling the right-aligned switches off to the edge.
+                // terminal doesn't fling the right-aligned values off to the edge.
                 let n = config.items.len() as u16;
                 let width = body
                     .width
                     .saturating_mul(7)
                     .saturating_div(10)
                     .clamp(48, 56);
-                let height = n.saturating_mul(2) + 6;
+                // +9: borders, input, gap, blank, option strip, 2 description
+                // lines, footer.
+                let height = n + 9;
                 let area = centered_rect_fixed(width, height, body);
                 self.set_overlay_regions(area);
                 self.render_config_overlay(frame, area, &config);
