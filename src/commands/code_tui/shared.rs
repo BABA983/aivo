@@ -870,7 +870,7 @@ pub(super) struct SkillToggle {
 pub(super) struct AgentRow {
     pub(super) name: String,
     pub(super) description: String,
-    /// "repo" | "user" | "pack" — where the file lives; packs aren't deletable here.
+    /// "builtin" | "repo" | "user" — where the file lives.
     pub(super) scope: &'static str,
     pub(super) source: std::path::PathBuf,
     pub(super) model: Option<String>,

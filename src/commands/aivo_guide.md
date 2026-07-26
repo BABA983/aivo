@@ -252,28 +252,12 @@ built-in: `explorer` (read-only codebase exploration), `aivo-guide` (answers que
 aivo itself), `verification` (adversarially checks a change works, PASS/FAIL), `advisor`
 (read-only second opinion on a hard call), and `evaluate` (code review with a verdict);
 shadow any by creating a same-named file. The rest are discovered from the repo
-(`.aivo/agents`, `.claude/agents`), `~/.config/aivo/agents`, and installed packs; an existing
+(`.aivo/agents`, `.claude/agents`) and `~/.config/aivo/agents`; an existing
 Claude Code `.claude/agents` fleet is picked up as-is (`model: inherit` honored — prefer full
 model ids over `sonnet`-style shorthands, which pass through verbatim). Just **ask the agent
 to create one** ("make me a code-reviewer subagent") and it authors the file for you; it's
 delegatable immediately (profiles resolve fresh at delegation time). Scope its tools (`tools: [read_file, grep]`), give it its own
 `model:`, or run it in a throwaway worktree (`isolation: worktree`) — all optional frontmatter.
-
-### Extension packs — `aivo code packs`
-
-One installable unit bundling skills, sub-agent profiles, hooks, and MCP servers — the
-Claude Code plugin layout (`.claude-plugin/plugin.json` + `skills/` + `agents/` +
-`hooks/hooks.json` + `.mcp.json`), so existing Claude Code plugins install unchanged.
-Installed under `~/.config/aivo/packs/<name>`; components join normal discovery at the
-lowest precedence (project and user files shadow them). Installing is the consent
-moment: `add` lists everything the pack ships — hooks and stdio MCP servers execute
-code — and asks before copying (`-y` skips; required off a TTY).
-
-```bash
-aivo code packs                     # list installed packs and what each ships
-aivo code packs add github:o/pack   # or a github.com (tree) URL, or a local path
-aivo code packs rm <name>           # remove the pack and everything it shipped
-```
 
 ### Hooks — `~/.config/aivo/hooks.json`
 

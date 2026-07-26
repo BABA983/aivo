@@ -53,8 +53,6 @@ pub fn discover_skills(cwd: &Path) -> Vec<Skill> {
         roots.push(crate::services::paths::config_dir().join("skills"));
         roots.push(home.join(".claude").join("skills"));
     }
-    // Installed packs' skills come last (project and user shadow them).
-    roots.extend(crate::agent::packs::skills_roots());
     discover_from_roots(&roots)
 }
 
@@ -172,8 +170,6 @@ pub fn skill_scope(dir: &Path, cwd: &Path) -> SkillScope {
         // Claude Code's library is discovered and usable, but belongs to Claude
         // Code, not aivo — never deletable via the `/skills` overlay.
         protected.push(home.join(".claude").join("skills"));
-        // Pack skills are managed as a unit via `aivo code packs`, not /skills.
-        protected.push(crate::services::paths::config_dir().join("packs"));
     }
     if protected.iter().any(|root| dir.starts_with(root)) {
         SkillScope::Project
@@ -1584,10 +1580,6 @@ mod tests {
         if let Some(home) = crate::services::system_env::home_dir() {
             assert_eq!(
                 skill_scope(&home.join(".claude/skills/repo-study"), cwd),
-                SkillScope::Project
-            );
-            assert_eq!(
-                skill_scope(&home.join(".config/aivo/packs/toolkit/skills/review"), cwd),
                 SkillScope::Project
             );
         }

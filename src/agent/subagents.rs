@@ -63,7 +63,7 @@ impl Subagent {
 
 /// The built-in profiles compiled into the binary: a read-only explorer, a docs
 /// expert on aivo itself, and the review trio (verification, advisor, evaluate).
-/// Lowest precedence — any same-named repo/user/pack file replaces them.
+/// Lowest precedence — any same-named repo/user file replaces them.
 pub fn builtin_subagents() -> Vec<Subagent> {
     [
         include_str!("builtin_agents/explorer.md"),
@@ -78,7 +78,7 @@ pub fn builtin_subagents() -> Vec<Subagent> {
 }
 
 /// Project dirs first (a repo can ship/shadow profiles), then user-global, then
-/// installed packs, then the compiled-in built-ins (lowest precedence).
+/// the compiled-in built-ins (lowest precedence).
 pub fn discover_subagents(cwd: &Path, config_dir: &Path) -> Vec<Subagent> {
     let project_roots = [
         cwd.join(".aivo").join("agents"),
@@ -86,7 +86,6 @@ pub fn discover_subagents(cwd: &Path, config_dir: &Path) -> Vec<Subagent> {
     ];
     let mut roots = project_roots.to_vec();
     roots.push(config_dir.join("agents"));
-    roots.extend(crate::agent::packs::agents_roots());
     let mut found = discover_from_roots(&roots);
     for sa in &mut found {
         sa.repo_local = project_roots.iter().any(|r| sa.source.starts_with(r));
@@ -97,11 +96,6 @@ pub fn discover_subagents(cwd: &Path, config_dir: &Path) -> Vec<Subagent> {
         }
     }
     found
-}
-
-/// Valid profile names under one dir (for pack scanning/consent display).
-pub fn profile_names(root: &Path) -> Vec<String> {
-    read_root(root).into_iter().map(|s| s.name).collect()
 }
 
 /// Collect sub-agents from `roots` in order, first name winning on collision.

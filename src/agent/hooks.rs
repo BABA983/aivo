@@ -61,32 +61,10 @@ enum HookVerdict {
 }
 
 impl HookSet {
-    /// The user file plus installed packs' hooks (both user-consented).
-    /// Missing/malformed → empty set. Project-scope hooks are deliberately not
-    /// read: repo commands = RCE-on-open.
+    /// The user's hook file. Missing/malformed → empty set. Project-scope hooks
+    /// are deliberately not read: repo commands = RCE-on-open.
     pub fn load_default() -> Self {
-        let mut set = Self::load_from(&crate::services::paths::config_dir().join("hooks.json"));
-        for file in crate::agent::packs::hooks_files() {
-            set.merge(Self::load_from(&file));
-        }
-        set
-    }
-
-    /// Append another set's rules (pack hooks run after the user's own).
-    pub fn merge(&mut self, other: HookSet) {
-        self.pre_tool_use.extend(other.pre_tool_use);
-        self.post_tool_use.extend(other.post_tool_use);
-        self.stop.extend(other.stop);
-    }
-
-    /// Every configured command, for the pack-install consent display.
-    pub fn commands(&self) -> Vec<String> {
-        [&self.pre_tool_use, &self.post_tool_use, &self.stop]
-            .iter()
-            .flat_map(|rules| rules.iter())
-            .flat_map(|r| r.hooks.iter())
-            .map(|c| c.command.clone())
-            .collect()
+        Self::load_from(&crate::services::paths::config_dir().join("hooks.json"))
     }
 
     pub fn load_from(path: &Path) -> Self {

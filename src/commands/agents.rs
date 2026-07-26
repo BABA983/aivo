@@ -2,7 +2,7 @@
 //! Interactive twin: `/agents` inside `aivo code`. Creation is conversational
 //! (ask the agent to make one), so there is deliberately no `add` verb.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
 
@@ -72,10 +72,6 @@ impl AgentsCommand {
         );
         println!(
             "  {}",
-            style::dim("<pack>/agents                     pack scope (rm the pack to remove)")
-        );
-        println!(
-            "  {}",
             style::dim("built-in (shadow with a same-named file): explorer, aivo-guide,")
         );
         println!("  {}", style::dim("  verification, advisor, evaluate"));
@@ -87,15 +83,13 @@ fn cwd() -> PathBuf {
 }
 
 /// Where a discovered profile lives, for display and delete eligibility.
-fn scope_label(sa: &Subagent, config_dir: &Path) -> &'static str {
+fn scope_label(sa: &Subagent) -> &'static str {
     if sa.is_builtin() {
         "builtin"
     } else if sa.repo_local {
         "repo"
-    } else if sa.source.starts_with(config_dir.join("agents")) {
-        "user"
     } else {
-        "pack"
+        "user"
     }
 }
 
@@ -113,7 +107,6 @@ fn list_action() -> Result<ExitCode> {
         );
         return Ok(ExitCode::Success);
     }
-    let config_dir = SessionStore::new().config_dir().to_path_buf();
     let name_w = found
         .iter()
         .map(|s| s.name.chars().count())
@@ -126,7 +119,7 @@ fn list_action() -> Result<ExitCode> {
             "{} {}  {}  {}",
             style::bullet_symbol(),
             style::cyan(format!("{:<name_w$}", s.name)),
-            style::dim(format!("{:<7}", scope_label(s, &config_dir))),
+            style::dim(format!("{:<7}", scope_label(s))),
             style::dim(fit(&advert_description(&s.description), desc_w)),
         );
     }
@@ -153,7 +146,6 @@ fn cat_action(args: AgentsNameArgs) -> Result<ExitCode> {
         eprintln!("No sub-agent named `{name}`.");
         return Ok(ExitCode::UserError);
     };
-    let config_dir = SessionStore::new().config_dir().to_path_buf();
     println!("Name:         {}", style::cyan(&sa.name));
     let location = if sa.is_builtin() {
         "compiled into aivo".to_string()
@@ -162,7 +154,7 @@ fn cat_action(args: AgentsNameArgs) -> Result<ExitCode> {
     };
     println!(
         "Scope:        {} ({})",
-        scope_label(&sa, &config_dir),
+        scope_label(&sa),
         style::dim(location)
     );
     println!(
@@ -194,12 +186,6 @@ fn remove_action(args: AgentsNameArgs) -> Result<ExitCode> {
     if sa.is_builtin() {
         return Err(anyhow!(
             "`{name}` is built into aivo — shadow it with your own ~/.config/aivo/agents/{name}.md instead"
-        ));
-    }
-    let config_dir = SessionStore::new().config_dir().to_path_buf();
-    if scope_label(&sa, &config_dir) == "pack" {
-        return Err(anyhow!(
-            "`{name}` ships with an extension pack — remove the pack instead (`aivo code packs`)"
         ));
     }
     std::fs::remove_file(&sa.source)

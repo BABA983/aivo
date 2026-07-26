@@ -100,10 +100,6 @@ pub enum Commands {
     #[command(name = "code skills", hide = true)]
     Skills(SkillsArgs),
 
-    /// Manage the coding agent's extension packs (list, add, rm)
-    #[command(name = "code packs", hide = true)]
-    Packs(PacksArgs),
-
     /// Manage the coding agent's named sub-agents (list, cat, rm)
     #[command(name = "code agents", hide = true)]
     Agents(AgentsArgs),
@@ -400,39 +396,6 @@ pub struct SkillsArgs {
     pub command: Option<SkillsSubcommand>,
 }
 
-/// Arguments for `aivo code packs` (pre-clap rewrite to the hidden top-level
-/// `code packs` command).
-#[derive(Parser, Debug, Clone)]
-pub struct PacksArgs {
-    #[command(subcommand)]
-    pub command: Option<PacksSubcommand>,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum PacksSubcommand {
-    /// List installed extension packs and what each ships
-    #[command(alias = "ls")]
-    List,
-
-    /// Install a pack from github:owner/repo, a github.com (tree) URL, or a local path
-    #[command(alias = "install")]
-    Add {
-        /// Pack source (Claude Code plugin layout: skills/, agents/, hooks/, .mcp.json)
-        source: String,
-        /// Skip the contents confirmation (required off a TTY when the pack
-        /// ships hooks or stdio MCP servers)
-        #[arg(short = 'y', long)]
-        yes: bool,
-    },
-
-    /// Remove an installed pack (and everything it shipped)
-    #[command(alias = "remove")]
-    Rm {
-        /// Installed pack name (see `aivo code packs list`)
-        name: String,
-    },
-}
-
 #[derive(Subcommand, Debug, Clone)]
 pub enum SkillsSubcommand {
     /// List discovered skills (project + user scope) with their state
@@ -497,7 +460,7 @@ pub struct AgentsArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AgentsSubcommand {
-    /// List discovered sub-agents (repo + user + pack scope)
+    /// List discovered sub-agents (repo + user scope)
     #[command(alias = "ls")]
     List,
 

@@ -250,7 +250,7 @@ impl AgentEngine {
             msg.push_str(&format!(
                 "\n\n[subagent] no profile named `{name}` — ran a generic sub-agent \
 instead. No such file in the agents dirs (project `.aivo/agents`/`.claude/agents`, \
-user config, packs); check the filename / `name:` frontmatter."
+user config); check the filename / `name:` frontmatter."
             ));
         }
         // A failed run on a model aivo's catalog doesn't know is most often a bad

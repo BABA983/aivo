@@ -1045,7 +1045,6 @@ is preserved."
             self.real_cwd.clone()
         };
         let config_dir = self.session_store.config_dir().to_path_buf();
-        let user_root = config_dir.join("agents");
         let items: Vec<AgentRow> =
             crate::agent::subagents::discover_subagents(std::path::Path::new(&cwd), &config_dir)
                 .into_iter()
@@ -1054,10 +1053,8 @@ is preserved."
                         "builtin"
                     } else if sa.repo_local {
                         "repo"
-                    } else if sa.source.starts_with(&user_root) {
-                        "user"
                     } else {
-                        "pack"
+                        "user"
                     },
                     tools: sa.resolved_tools(),
                     name: sa.name,
@@ -1100,9 +1097,8 @@ is preserved."
         }
     }
 
-    /// Delete a sub-agent's file by name (repo or user scope only — a pack's
-    /// profiles are removed with the pack). Rebuilds the engine so the advert
-    /// and the `agent` enum drop the name next turn.
+    /// Delete a sub-agent's file by name (repo or user scope only). Rebuilds the
+    /// engine so the advert and the `agent` enum drop the name next turn.
     pub(super) async fn remove_agent_named(&mut self, name: &str) -> Result<()> {
         let cwd = if self.real_cwd.is_empty() {
             ".".to_string()
@@ -1122,14 +1118,6 @@ is preserved."
             self.notice = Some((
                 ERROR(),
                 format!("“{name}” is built into aivo — shadow it with your own {name}.md instead"),
-            ));
-            return Ok(());
-        }
-        let user_root = config_dir.join("agents");
-        if !sa.repo_local && !sa.source.starts_with(&user_root) {
-            self.notice = Some((
-                ERROR(),
-                format!("“{name}” ships with a pack — remove the pack instead (aivo code packs)"),
             ));
             return Ok(());
         }
@@ -2149,15 +2137,6 @@ is preserved."
             self.notice = Some((
                 WARNING(),
                 format!("`{name}` is defined in .mcp.json — edit that file to remove it"),
-            ));
-            return Ok(());
-        }
-        if scope == crate::agent::mcp::ServerScope::Pack {
-            self.notice = Some((
-                WARNING(),
-                format!(
-                    "`{name}` is provided by an installed pack — remove it with `aivo code packs rm`"
-                ),
             ));
             return Ok(());
         }
