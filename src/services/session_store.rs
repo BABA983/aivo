@@ -807,9 +807,15 @@ pub struct MessageAttachment {
     pub storage: AttachmentStorage,
 }
 
+impl MessageAttachment {
+    pub fn is_image(&self) -> bool {
+        self.mime_type.starts_with("image/")
+    }
+}
+
 /// The persisted `aivo code` toggles, read together at startup (see
 /// [`SessionStore::get_chat_toggles`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatToggles {
     pub auto_approve: bool,
     /// Whether an edit-bearing batch pauses for a diff-review card before writing
@@ -825,6 +831,11 @@ pub struct ChatToggles {
     /// so startup auto-detects from the terminal background (falling back to dark);
     /// `Some` = an explicit choice that's always honored.
     pub theme: Option<ChatTheme>,
+    /// Describe images for a text-only active model (`/config`); default gateway.
+    pub vision_fallback: VisionFallbackMode,
+    /// The custom describer `(key_id, model)`, stored independently of the mode
+    /// so it survives mode flips. `None` when never set or malformed.
+    pub vision_fallback_custom: Option<(String, String)>,
 }
 
 /// Persisted chat TUI color theme (`"theme"` in code-prefs.json).
@@ -848,6 +859,36 @@ impl ChatTheme {
             "dark" => Some(Self::Dark),
             "light" => Some(Self::Light),
             _ => None,
+        }
+    }
+}
+
+/// Persisted vision-fallback mode (`"visionFallback"` in code-prefs.json). The
+/// describer pair lives under the sibling `"visionFallbackCustom"` key so
+/// flipping the mode away and back doesn't lose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VisionFallbackMode {
+    #[default]
+    Gateway,
+    Custom,
+    Off,
+}
+
+impl VisionFallbackMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::Custom => "custom",
+            Self::Off => "off",
+        }
+    }
+
+    /// Missing/unknown → the default (gateway), so the feature is on out of the box.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "custom" => Self::Custom,
+            "off" => Self::Off,
+            _ => Self::Gateway,
         }
     }
 }
@@ -2109,7 +2150,27 @@ impl SessionStore {
         self.write_code_prefs(&prefs).await
     }
 
-    /// Both `aivo code` toggles in a single read of code-prefs.json, so startup
+    /// One read-modify-write, preserving sibling prefs (atomic write).
+    pub async fn set_chat_vision_fallback(
+        &self,
+        mode: VisionFallbackMode,
+        custom: Option<(&str, &str)>,
+    ) -> Result<()> {
+        let mut prefs = self.read_code_prefs().await;
+        prefs.insert(
+            "visionFallback".into(),
+            serde_json::Value::String(mode.as_str().to_string()),
+        );
+        if let Some((key_id, model)) = custom {
+            prefs.insert(
+                "visionFallbackCustom".into(),
+                serde_json::json!({ "keyId": key_id, "model": model }),
+            );
+        }
+        self.write_code_prefs(&prefs).await
+    }
+
+    /// Every `aivo code` toggle in a single read of code-prefs.json, so startup
     /// doesn't open+parse the same file twice.
     pub async fn get_chat_toggles(&self) -> ChatToggles {
         let prefs = self.read_code_prefs().await;
@@ -2137,6 +2198,19 @@ impl SessionStore {
                 .get("theme")
                 .and_then(|v| v.as_str())
                 .and_then(ChatTheme::parse),
+            vision_fallback: prefs
+                .get("visionFallback")
+                .and_then(|v| v.as_str())
+                .map(VisionFallbackMode::parse)
+                .unwrap_or_default(),
+            vision_fallback_custom: prefs
+                .get("visionFallbackCustom")
+                .and_then(|v| {
+                    let key_id = v.get("keyId")?.as_str()?.to_string();
+                    let model = v.get("model")?.as_str()?.to_string();
+                    Some((key_id, model))
+                })
+                .filter(|(key_id, model)| !key_id.is_empty() && !model.is_empty()),
         }
     }
 
@@ -2714,6 +2788,45 @@ mod tests {
         let config = store.load().await.unwrap();
         assert!(config.api_keys.is_empty());
         assert!(config.active_key_id.is_none());
+    }
+
+    /// Flipping the mode away and back must not lose the stored describer.
+    #[tokio::test]
+    async fn vision_fallback_prefs_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = SessionStore::with_path(temp_dir.path().join("config.json"));
+
+        let toggles = store.get_chat_toggles().await;
+        assert_eq!(toggles.vision_fallback, VisionFallbackMode::Gateway);
+        assert!(toggles.vision_fallback_custom.is_none());
+
+        store
+            .set_chat_vision_fallback(
+                VisionFallbackMode::Off,
+                Some(("key123", "gemini-2.5-flash")),
+            )
+            .await
+            .unwrap();
+        let toggles = store.get_chat_toggles().await;
+        assert_eq!(toggles.vision_fallback, VisionFallbackMode::Off);
+        // The pair survives the mode flip.
+        assert_eq!(
+            toggles.vision_fallback_custom,
+            Some(("key123".to_string(), "gemini-2.5-flash".to_string()))
+        );
+
+        store
+            .set_chat_vision_fallback(VisionFallbackMode::Custom, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_chat_toggles().await.vision_fallback,
+            VisionFallbackMode::Custom
+        );
+        assert_eq!(
+            VisionFallbackMode::parse("bogus"),
+            VisionFallbackMode::Gateway
+        );
     }
 
     /// The per-repo project-MCP allow-list round-trips and shares code-prefs.json

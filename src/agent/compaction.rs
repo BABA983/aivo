@@ -167,7 +167,7 @@ impl AgentEngine {
         if cut <= 1 {
             return 0;
         }
-        let transcript = serialize_transcript(&self.restore_snipped_range(cut));
+        let transcript = self.summary_transcript(cut);
         let transcript_len = transcript.len();
         let request = self.build_summary_request(&transcript);
         ui.notify("compacting context…");
@@ -207,6 +207,14 @@ impl AgentEngine {
             break;
         }
         usage
+    }
+
+    /// Snip-restored + description-substituted — a description beats a bare
+    /// `[image]` even on a vision model (cache hits only).
+    fn summary_transcript(&self, cut: usize) -> String {
+        let mut range = self.restore_snipped_range(cut);
+        super::engine::substitute_image_parts(&mut range, &self.image_descriptions);
+        serialize_transcript(&range)
     }
 
     /// Shared degenerate/error fallback.
@@ -1247,6 +1255,32 @@ mod tests {
             assert_eq!(tokens, 0);
             assert_eq!(e.messages, snapshot);
         }
+    }
+
+    #[test]
+    fn summary_transcript_substitutes_cached_image_descriptions() {
+        let mut e = engine();
+        e.messages = vec![
+            json!({"role":"system","content":"sys"}),
+            json!({"role":"user","content":[
+                {"type":"text","text":"what is this?"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}},
+            ]}),
+            json!({"role":"assistant","content":"a button"}),
+            json!({"role":"user","content":"recent"}),
+        ];
+        let bare = e.summary_transcript(3);
+        assert!(bare.contains("[image]"), "miss stays a marker: {bare}");
+
+        e.insert_image_description(
+            crate::services::vision_describe::image_hash("aGVsbG8="),
+            "[Image] a red Submit button".to_string(),
+        );
+        let described = e.summary_transcript(3);
+        assert!(
+            described.contains("a red Submit button") && !described.contains("[image]"),
+            "cached description must ride the summary transcript: {described}"
+        );
     }
 
     #[test]

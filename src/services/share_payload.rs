@@ -344,12 +344,7 @@ fn map_chat_tool_result(raw: &str, timestamp: Option<DateTime<Utc>>) -> ShareMes
 }
 
 fn map_attachment(att: MessageAttachment) -> ContentBlock {
-    let kind = if att.mime_type.starts_with("image/") {
-        "image"
-    } else {
-        "file"
-    }
-    .to_string();
+    let kind = if att.is_image() { "image" } else { "file" }.to_string();
     let (sha256, size_bytes) = match &att.storage {
         AttachmentStorage::Inline { data } => {
             // Hash the raw base64 (dedup only, not forensics) to avoid a decode dep.

@@ -459,6 +459,7 @@ pub async fn run() -> ! {
                     code_args.max_output_tokens,
                     code_args.max_cost,
                     code_args.auto_approve,
+                    code_args.vision_model,
                 )
                 .await
         }

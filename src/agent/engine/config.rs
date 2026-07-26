@@ -93,6 +93,8 @@ impl AgentEngine {
             billed_model: None,
             prefix_cache_seen: false,
             snipped_originals: std::collections::HashMap::new(),
+            image_descriptions: std::collections::HashMap::new(),
+            substitute_images: false,
         }
     }
 
@@ -305,6 +307,20 @@ plan-approval card — suggest it when a task deserves real design discussion.",
     /// Turn thinking on/off for upcoming turns (`/config`). Off makes [`Self::thinking_request`] emit a disable signal.
     pub fn set_thinking_enabled(&mut self, on: bool) {
         self.thinking_enabled = on;
+    }
+
+    pub fn set_image_substitution(&mut self, on: bool) {
+        self.substitute_images = on;
+    }
+
+    pub fn insert_image_description(&mut self, hash: String, text: String) {
+        self.image_descriptions.insert(hash, text);
+    }
+
+    /// The app's cache is the copy that survives engine rebuilds.
+    pub fn merge_image_descriptions(&mut self, map: &std::collections::HashMap<String, String>) {
+        self.image_descriptions
+            .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 
     /// `/config` toggle: add/remove the local hosted `web_search` tool. Idempotent;

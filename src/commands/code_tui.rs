@@ -117,7 +117,23 @@ impl CodeTuiApp {
             web_search_enabled,
             agent_tools_enabled,
             theme: chat_theme,
+            vision_fallback,
+            vision_fallback_custom,
         } = params.session_store.get_chat_toggles().await;
+        // Session-only describer override; forces custom mode.
+        let vision_override = match params.vision_model.as_deref().map(parse_vision_flag) {
+            Some(VisionFlag::Describer { key, model }) => Some(
+                resolve_vision_model_override(
+                    &params.session_store,
+                    &params.key,
+                    &params.model,
+                    key,
+                    model,
+                )
+                .await,
+            ),
+            _ => None,
+        };
         let theme = resolve_startup_theme(chat_theme);
         set_ui_theme(theme);
         // Move any pre-existing `/skills` + `/mcp` opt-outs out of config.json (where
@@ -196,10 +212,112 @@ impl CodeTuiApp {
         app.thinking_enabled = thinking_enabled;
         app.web_search_enabled = web_search_enabled;
         app.agent_tools_enabled = agent_tools_enabled;
+        app.vision_fallback = vision_fallback;
+        app.vision_fallback_custom = vision_fallback_custom;
+        match vision_override {
+            Some(Ok(pair)) => {
+                app.vision_fallback_custom = Some(pair);
+                app.vision_fallback = crate::services::session_store::VisionFallbackMode::Custom;
+            }
+            // Overwrites the startup notice on purpose.
+            Some(Err(message)) => app.notice = Some((ERROR(), message)),
+            None => {}
+        }
         app.theme = theme;
         app.jobs = jobs;
         Ok(app)
     }
+}
+
+/// Same id/short-id/name contract as `-k`. Agent-capable only: the describer
+/// rides the loopback router, which launch-bound OAuth/ACP keys can't.
+pub(super) async fn resolve_describer_key(
+    store: &SessionStore,
+    query: &str,
+) -> std::result::Result<ApiKey, String> {
+    let matches = store
+        .find_keys_by_id_or_name_info(query)
+        .await
+        .map_err(|e| format!("--vision-model: couldn't read keys: {e}"))?;
+    let key = match matches.len() {
+        0 => {
+            return Err(format!(
+                "--vision-model: no key named '{query}' — see aivo keys"
+            ));
+        }
+        1 => matches.into_iter().next().unwrap(),
+        n => {
+            return Err(format!(
+                "--vision-model: '{query}' matches {n} keys — use the key id (aivo keys list)"
+            ));
+        }
+    };
+    require_describer_key(key)
+}
+
+fn require_describer_key(key: ApiKey) -> std::result::Result<ApiKey, String> {
+    if crate::commands::code_agent_oneshot::key_is_agent_capable(&key) {
+        return Ok(key);
+    }
+    Err(format!(
+        "--vision-model: '{}' can't serve as a describer (launch-bound OAuth/ACP)",
+        key.name
+    ))
+}
+
+/// The per-model upstream routes by name, so a describer equal to the active
+/// model would hijack the main chat.
+pub(super) fn validate_describer_model(
+    model: &str,
+    active_model: &str,
+) -> std::result::Result<(), String> {
+    if model == active_model {
+        return Err("the describer can't be the active model — pick a different one".to_string());
+    }
+    if crate::services::model_metadata::snapshot_limits(model).is_some_and(|l| !l.image_input) {
+        return Err(format!(
+            "{model} isn't a vision model — pick one that reads images"
+        ));
+    }
+    Ok(())
+}
+
+/// An empty model half means "open a picker", handled after startup.
+enum VisionFlag {
+    Describer { key: Option<String>, model: String },
+    KeyPicker(String),
+    Picker,
+}
+
+fn parse_vision_flag(spec: &str) -> VisionFlag {
+    let (key, model) = crate::cli_args::split_tier_spec(spec);
+    let model = model.trim();
+    if !model.is_empty() {
+        return VisionFlag::Describer {
+            key,
+            model: model.to_string(),
+        };
+    }
+    match key {
+        Some(query) => VisionFlag::KeyPicker(query),
+        None => VisionFlag::Picker,
+    }
+}
+
+/// No `key::` half → the active session key.
+async fn resolve_vision_model_override(
+    store: &SessionStore,
+    active_key: &ApiKey,
+    active_model: &str,
+    key_ref: Option<String>,
+    model: String,
+) -> std::result::Result<(String, String), String> {
+    let key = match key_ref {
+        None => require_describer_key(active_key.clone())?,
+        Some(query) => resolve_describer_key(store, &query).await?,
+    };
+    validate_describer_model(&model, active_model).map_err(|e| format!("--vision-model: {e}"))?;
+    Ok((key.id, model))
 }
 
 pub(super) async fn run_chat_tui(params: CodeTuiParams) -> Result<()> {
@@ -218,6 +336,11 @@ pub(super) async fn run_chat_tui(params: CodeTuiParams) -> Result<()> {
     let initial_resume = params.initial_resume.clone();
     let initial_prompt = params.initial_prompt.clone();
     let share = params.share;
+    let vision_picker_at_start = match params.vision_model.as_deref().map(parse_vision_flag) {
+        Some(VisionFlag::KeyPicker(query)) => Some(Some(query)),
+        Some(VisionFlag::Picker) => Some(None),
+        _ => None,
+    };
     let mut app = CodeTuiApp::new(params).await?;
     app.refresh_context_window().await;
     // Surface discovered skills as `/`-typeable slash commands (e.g. `/repo-study`)
@@ -238,6 +361,11 @@ pub(super) async fn run_chat_tui(params: CodeTuiParams) -> Result<()> {
             // Re-resolve the full limits (window + efforts), not just the window.
             let _ = tx.send(RuntimeEvent::CatalogWarmed);
         });
+    }
+    match vision_picker_at_start {
+        Some(Some(key_query)) => app.open_vision_picker_for_key(&key_query).await,
+        Some(None) => app.open_vision_key_picker().await,
+        None => {}
     }
     // `--resume`: open the session picker (empty arg) or jump straight to a
     // session by id. Mirrors the in-chat `/resume [query]`; failure is

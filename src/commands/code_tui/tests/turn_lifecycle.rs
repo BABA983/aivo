@@ -514,6 +514,8 @@ async fn test_preflight_refuses_image_on_known_text_only_model() {
     let mut app = make_test_app(tx, rx);
     app.model = "glm-5.1".to_string();
     app.model_image_input = Some(false); // snapshot says text-only
+    // Off, else the fallback would rescue it.
+    app.vision_fallback = crate::services::session_store::VisionFallbackMode::Off;
     app.draft_attachments.push(MessageAttachment {
         name: "shot.png".to_string(),
         mime_type: "image/png".to_string(),
@@ -529,6 +531,10 @@ async fn test_preflight_refuses_image_on_known_text_only_model() {
     let (style, msg) = app.notice.clone().expect("a refusal notice is shown");
     assert_eq!(style, ERROR());
     assert!(msg.contains("can't read images"), "got: {msg}");
+    assert!(
+        msg.contains("Vision fallback in /config"),
+        "off-mode refusal points at the toggle: {msg}"
+    );
     // The draft + attachment survive so the user can switch models and resend;
     // nothing was sent.
     assert_eq!(app.draft_attachments.len(), 1, "attachment retained");

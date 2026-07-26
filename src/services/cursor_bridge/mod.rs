@@ -1164,27 +1164,17 @@ pub(crate) fn image_capability_error() -> &'static str {
     "cursor: this session's cursor-agent does not advertise promptCapabilities.image; remove the image from the request"
 }
 
-/// Parse a `data:<mime>;base64,<payload>` URL into `(mime, base64_payload)`.
-/// Returns None for non-data URLs (http, gs://, file ids, etc.) so the
-/// caller can produce a "remote URLs not supported" error. Also returns
-/// None for non-base64 data URLs (e.g. URL-encoded text) — those would
-/// require decoding and re-encoding, and image clients never use them.
+/// Owned `(mime, base64_payload)`, defaulting a missing media type. `None` for
+/// non-data and non-base64 URLs, so the caller can produce a "remote URLs not
+/// supported" error.
 pub(crate) fn parse_data_url(url: &str) -> Option<(String, String)> {
-    let rest = url.strip_prefix("data:")?;
-    let (meta, payload) = rest.split_once(',')?;
-    let mut parts: Vec<&str> = meta.split(';').collect();
-    let has_base64 = parts.iter().any(|p| p.eq_ignore_ascii_case("base64"));
-    if !has_base64 {
-        return None;
-    }
-    parts.retain(|p| !p.eq_ignore_ascii_case("base64"));
-    let mime = parts
-        .first()
-        .copied()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    Some((mime, payload.to_string()))
+    let (mime, payload) = crate::services::vision_describe::parse_data_url(url)?;
+    let mime = if mime.is_empty() {
+        "application/octet-stream"
+    } else {
+        mime
+    };
+    Some((mime.to_string(), payload.to_string()))
 }
 
 pub(crate) fn parse_loose_json(raw: &str) -> Value {

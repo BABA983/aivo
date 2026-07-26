@@ -1244,7 +1244,7 @@ fn test_agent_seed_turns_folds_tool_steps() {
         msg("tool_result", "     1\tfn main() {}"),
         msg("assistant", "it's an empty main"),
     ];
-    let seed = super::super::runtime_impl::agent_seed_turns(&history);
+    let seed = super::super::runtime_impl::agent_seed_turns(&history, &Default::default());
     // user, assistant, [folded tool note], assistant — the tool step is preserved
     // as an assistant note instead of dropped (which caused resume amnesia).
     assert_eq!(seed.len(), 4);

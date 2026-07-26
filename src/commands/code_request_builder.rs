@@ -137,7 +137,7 @@ pub(crate) fn build_openai_message(message: &ChatMessage) -> Result<serde_json::
 
     for attachment in &message.attachments {
         let data = require_inline(attachment)?;
-        if attachment.mime_type.starts_with("image/") {
+        if attachment.is_image() {
             parts.push(serde_json::json!({
                 "type": "image_url",
                 "image_url": {
@@ -217,7 +217,7 @@ fn build_responses_input_item(message: &ChatMessage) -> Result<serde_json::Value
 
     for attachment in &message.attachments {
         let data = require_inline(attachment)?;
-        if attachment.mime_type.starts_with("image/") {
+        if attachment.is_image() {
             parts.push(serde_json::json!({
                 "type": "input_image",
                 "image_url": format!("data:{};base64,{}", attachment.mime_type, data),
@@ -317,7 +317,7 @@ fn build_anthropic_content(message: &ChatMessage) -> Result<serde_json::Value> {
 
     for attachment in &message.attachments {
         let data = require_inline(attachment)?;
-        if attachment.mime_type.starts_with("image/") {
+        if attachment.is_image() {
             blocks.push(serde_json::json!({
                 "type": "image",
                 "source": {
@@ -407,7 +407,7 @@ fn build_google_user_parts(message: &ChatMessage) -> Result<Vec<serde_json::Valu
 
     for attachment in &message.attachments {
         let data = require_inline(attachment)?;
-        if attachment.mime_type.starts_with("image/") || is_document_mime(&attachment.mime_type) {
+        if attachment.is_image() || is_document_mime(&attachment.mime_type) {
             parts.push(serde_json::json!({
                 "inlineData": {
                     "mimeType": attachment.mime_type,

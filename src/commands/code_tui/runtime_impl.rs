@@ -4,6 +4,7 @@ use crate::agent::engine::RewindOutcome;
 use crate::agent::protocol::Decision;
 use crate::services::acp_client::PromptEvent;
 use crate::services::cursor_acp::{self, CursorAcpSession, CursorChunk, CursorTurnResult};
+use crate::services::vision_describe;
 use anyhow::Context;
 
 /// Default cap on total `/goal` turns (override: `AIVO_GOAL_MAX_ITERS`).
@@ -367,22 +368,28 @@ impl CodeTuiApp {
         record: Option<String>,
         display: Option<String>,
     ) -> Result<()> {
-        // A known text-only model would 400 on image bytes; refuse here instead,
-        // keeping the draft + attachment so the user can switch models and resend.
-        if self.model_image_input == Some(false)
-            && self
-                .draft_attachments
-                .iter()
-                .any(|a| a.mime_type.starts_with("image/"))
-        {
-            self.notice = Some((
-                ERROR(),
-                format!(
-                    "{} can't read images — switch to a vision model (e.g. /model) and resend.",
-                    self.model
-                ),
-            ));
-            return Ok(());
+        // A known text-only model would 400 on image bytes. The fallback describes
+        // them instead; anything it can't take falls closed to the refusal, keeping
+        // draft + attachment so the user can switch and resend.
+        let mut vision_shim: Option<DescriberSource> = None;
+        if self.model_image_input == Some(false) {
+            let has_image_draft = self.draft_attachments.iter().any(|a| a.is_image());
+            let has_other_draft = self.draft_attachments.iter().any(|a| !a.is_image());
+            if has_image_draft && has_other_draft {
+                // The shim only covers the agent route, which needs all images.
+                self.notice = Some((ERROR(), self.image_refusal_base()));
+                return Ok(());
+            }
+            if has_image_draft || self.history_has_image() {
+                match self.resolve_describer().await {
+                    Ok(src) => vision_shim = Some(src),
+                    Err(refusal) if has_image_draft => {
+                        self.notice = Some((ERROR(), refusal));
+                        return Ok(());
+                    }
+                    Err(_) => {}
+                }
+            }
         }
         // An outgoing turn implicitly defers the `/new` continue prompt — the
         // plan stays for `/plan resume`. (The `y` path takes the card first.)
@@ -450,21 +457,22 @@ impl CodeTuiApp {
         self.follow_output = true;
 
         let conversation_has_image = self.history_has_image();
-        let all_images = !attachments.is_empty()
-            && attachments
-                .iter()
-                .all(|a| a.mime_type.starts_with("image/"));
-        // Route images to the agent only on a model we KNOW reads them; unknown/text-only
-        // keep the plain-chat route (which has 400-recovery; text-only was refused above).
-        let agent_vision_ok = all_images && self.model_image_input == Some(true);
-        // Images that accrued on plain chat must keep re-sending there.
-        let stay_plain_for_vision = conversation_has_image && self.model_image_input != Some(true);
+        let all_images = !attachments.is_empty() && attachments.iter().all(|a| a.is_image());
+        let shim_active = vision_shim.is_some();
+        // Route images to the agent on a model we KNOW reads them, or with the
+        // vision shim covering (images become described text); unknown models
+        // keep the plain-chat route (which has 400-recovery).
+        let agent_vision_ok = all_images && (self.model_image_input == Some(true) || shim_active);
+        // Images that accrued on plain chat must keep re-sending there — unless
+        // the shim substitutes them, which keeps the agent path (tools stay on).
+        let stay_plain_for_vision =
+            conversation_has_image && self.model_image_input != Some(true) && !shim_active;
         let route_agent = self.agent_capable()
             && ((attachments.is_empty() && !stay_plain_for_vision) || agent_vision_ok);
         if self.key.is_cursor_acp() {
             self.spawn_cursor_turn(input, attachments);
         } else if route_agent {
-            self.spawn_agent_turn(input, attachments).await;
+            self.spawn_agent_turn(input, attachments, vision_shim).await;
         } else {
             if self.agent_capable() && (!attachments.is_empty() || conversation_has_image) {
                 let msg = if attachments.is_empty() {
@@ -582,16 +590,80 @@ impl CodeTuiApp {
 
     /// True when any history message carries an image attachment.
     pub(super) fn history_has_image(&self) -> bool {
-        self.history.iter().any(|m| {
-            m.attachments
-                .iter()
-                .any(|a| a.mime_type.starts_with("image/"))
-        })
+        self.history
+            .iter()
+            .any(|m| m.attachments.iter().any(|a| a.is_image()))
     }
 
     /// True when the current key can drive the in-process agent (see `key_is_agent_capable`).
     pub(super) fn agent_capable(&self) -> bool {
         crate::commands::code_agent_oneshot::key_is_agent_capable(&self.key)
+    }
+
+    pub(super) fn describer_status(&self) -> DescriberStatus {
+        use crate::services::session_store::VisionFallbackMode;
+        if !self.agent_capable() {
+            return DescriberStatus::NotAgentCapable;
+        }
+        match &self.vision_fallback {
+            VisionFallbackMode::Off => DescriberStatus::Off,
+            VisionFallbackMode::Gateway
+                if crate::services::vision_describe::describe_exhausted() =>
+            {
+                DescriberStatus::Exhausted
+            }
+            VisionFallbackMode::Gateway => DescriberStatus::Gateway,
+            VisionFallbackMode::Custom => match &self.vision_fallback_custom {
+                Some((key_id, model)) if *model != self.model => DescriberStatus::OwnKey {
+                    key_id: key_id.clone(),
+                    model: model.clone(),
+                },
+                _ => DescriberStatus::Unconfigured,
+            },
+        }
+    }
+
+    /// The custom key is resolved + decrypted here so the spawned turn just
+    /// calls it.
+    pub(super) async fn resolve_describer(&self) -> std::result::Result<DescriberSource, String> {
+        let status = self.describer_status();
+        match &status {
+            DescriberStatus::Gateway => return Ok(DescriberSource::Gateway),
+            DescriberStatus::OwnKey { key_id, model } => {
+                if let Ok(Some(mut key)) = self.session_store.get_key_by_id(key_id).await
+                    && crate::services::session_store::SessionStore::decrypt_key_secret(&mut key)
+                        .is_ok()
+                {
+                    return Ok(DescriberSource::OwnKey {
+                        model: model.clone(),
+                        key: Box::new(key),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Err(self.vision_refusal_message(&status))
+    }
+
+    fn image_refusal_base(&self) -> String {
+        format!(
+            "{} can't read images — switch to a vision model (e.g. /model) and resend.",
+            self.model
+        )
+    }
+
+    /// The image refusal, hinted by WHY the fallback didn't cover. `OwnKey` lands
+    /// here only when the stored key vanished or wouldn't decrypt.
+    fn vision_refusal_message(&self, status: &DescriberStatus) -> String {
+        let base = self.image_refusal_base();
+        match status {
+            DescriberStatus::Off => format!("{base} Or turn on Vision fallback in /config."),
+            DescriberStatus::Exhausted => format!("image-describe quota used up — {base}"),
+            DescriberStatus::Unconfigured | DescriberStatus::OwnKey { .. } => {
+                format!("{base} Or re-pick the describer: /config → Vision fallback → custom.")
+            }
+            DescriberStatus::Gateway | DescriberStatus::NotAgentCapable => base,
+        }
     }
 
     /// Refresh the cached git branch for `display_cwd`, throttled so the footer's
@@ -697,7 +769,12 @@ impl CodeTuiApp {
     /// Run one agent turn: (re)build the in-process engine, start a per-turn
     /// loopback serve, then drive `engine.run_turn` on a background task that
     /// streams text/tool-steps and permission requests back as `RuntimeEvent`s.
-    async fn spawn_agent_turn(&mut self, input: String, attachments: Vec<MessageAttachment>) {
+    async fn spawn_agent_turn(
+        &mut self,
+        input: String,
+        attachments: Vec<MessageAttachment>,
+        vision_shim: Option<DescriberSource>,
+    ) {
         use crate::agent::engine::{AgentEngine, TurnCtx};
 
         // Self-verify at declared-done: opt-in normally, default-on under goal mode.
@@ -857,7 +934,7 @@ impl CodeTuiApp {
                 }
             } else {
                 let prior = self.history.len().saturating_sub(1);
-                let seed = agent_seed_turns(&self.history[..prior]);
+                let seed = agent_seed_turns(&self.history[..prior], &self.vision_descriptions);
                 engine.seed_history(seed);
             }
             // Offer any configured MCP servers' tools. Connect in the BACKGROUND
@@ -910,7 +987,14 @@ impl CodeTuiApp {
         }
         let engine = self.agent_engine.as_ref().unwrap().engine.clone();
 
-        let (base, auth) = match self.start_agent_serve().await {
+        // Rides this turn's loopback: same auth, same usage accounting.
+        let describer_upstream = match &vision_shim {
+            Some(DescriberSource::OwnKey { model, key }) => {
+                Some((model.clone(), key.as_ref().clone()))
+            }
+            _ => None,
+        };
+        let (base, auth) = match self.start_agent_serve(describer_upstream).await {
             Ok(t) => t,
             Err(e) => {
                 self.notice = Some((ERROR(), format!("agent serve failed to start: {e}")));
@@ -981,6 +1065,10 @@ impl CodeTuiApp {
             }
             _ => input.clone(),
         };
+        let vision_descriptions = match &vision_shim {
+            Some(_) => self.vision_descriptions.clone(),
+            None => std::collections::HashMap::new(),
+        };
         self.response_task = Some(tokio::spawn(async move {
             let client = crate::services::http_utils::router_http_client();
             let ctx = TurnCtx {
@@ -1007,6 +1095,51 @@ impl CodeTuiApp {
             engine.set_reasoning_efforts(reasoning_efforts);
             if let Some(effort) = reasoning_effort {
                 engine.set_reasoning_effort(effort);
+            }
+            // Before the first request: a failure returns here, where the engine
+            // hasn't consumed the turn, so the composer restores cleanly.
+            engine.set_image_substitution(vision_shim.is_some());
+            if let Some(src) = &vision_shim {
+                engine.merge_image_descriptions(&vision_descriptions);
+                let todo = engine.undescribed_images(multimodal.as_ref());
+                if !todo.is_empty() {
+                    let noun = if todo.len() == 1 { "image" } else { "images" };
+                    let _ = ui.tx.send(RuntimeEvent::AgentNotice(format!(
+                        "describing {} {noun} via {}…",
+                        todo.len(),
+                        src.label()
+                    )));
+                }
+                // Independent calls, so pay one round trip rather than N.
+                let (client, base, auth) = (&client, &base, &auth);
+                let described =
+                    futures::future::join_all(todo.iter().map(|(hash, url)| async move {
+                        (
+                            hash,
+                            vision_describe::describe(src, client, base, auth, url).await,
+                        )
+                    }))
+                    .await;
+                let mut failure = None;
+                for (hash, result) in described {
+                    match result {
+                        // Cache even when a sibling failed, so the retry only
+                        // re-describes what actually broke.
+                        Ok(desc) => {
+                            let text = vision_describe::format_described_image(&desc);
+                            engine.insert_image_description(hash.clone(), text.clone());
+                            let _ = ui.tx.send(RuntimeEvent::ImageDescribed {
+                                hash: hash.clone(),
+                                text,
+                            });
+                        }
+                        Err(message) => failure = failure.or(Some(message)),
+                    }
+                }
+                if let Some(message) = failure {
+                    let _ = ui.tx.send(RuntimeEvent::DescribeFailed { message });
+                    return;
+                }
             }
             // run_turn ends by calling ui.footer → AgentFinished commits the turn.
             let content = multimodal.unwrap_or(serde_json::Value::String(input));
@@ -1039,9 +1172,12 @@ impl CodeTuiApp {
     }
 
     /// Loopback serve router + auth token (sole egress, usage under "code").
+    /// `model_upstream` routes one extra model name (the vision-fallback
+    /// describer) to another key through the same loopback.
     async fn build_agent_serve_router(
         key: &ApiKey,
         session_store: &crate::services::session_store::SessionStore,
+        model_upstream: Option<(String, ApiKey)>,
     ) -> (crate::services::serve_router::ServeRouter, String) {
         use crate::services::serve_router::{
             ServeRouter, ServeRouterConfig, random_auth_token, resolve_grok_fallback,
@@ -1060,16 +1196,23 @@ impl CodeTuiApp {
             std::collections::HashMap::new(),
         )
         .with_grok_fallback(grok_fallback);
-        let router = ServeRouter::new(config, key.clone(), session_store.logs())
+        let mut router = ServeRouter::new(config, key.clone(), session_store.logs())
             .with_oauth_persist(session_store.clone())
             .with_usage_accounting(session_store.clone(), "code".to_string())
             .quiet(true);
+        if let Some((model, upstream_key)) = model_upstream {
+            router = router.with_model_upstreams(vec![(model, upstream_key)]);
+        }
         (router, auth)
     }
 
     /// Start this turn's loopback serve; sets `self.agent_serve`, returns `(base, auth)`.
-    async fn start_agent_serve(&mut self) -> Result<(String, String)> {
-        let (router, auth) = Self::build_agent_serve_router(&self.key, &self.session_store).await;
+    async fn start_agent_serve(
+        &mut self,
+        model_upstream: Option<(String, ApiKey)>,
+    ) -> Result<(String, String)> {
+        let (router, auth) =
+            Self::build_agent_serve_router(&self.key, &self.session_store, model_upstream).await;
         let router = router.with_route_cache(self.agent_route_cache());
         let (handle, shutdown, port) = router.start_background_with_addr("127.0.0.1", 0).await?;
         self.agent_serve = Some((handle, shutdown));
@@ -1131,7 +1274,7 @@ impl CodeTuiApp {
     ) {
         use crate::agent::engine::TurnCtx;
 
-        let (base, auth) = match self.start_agent_serve().await {
+        let (base, auth) = match self.start_agent_serve(None).await {
             Ok(t) => t,
             Err(e) => {
                 self.notice = Some((ERROR(), format!("compact serve failed to start: {e}")));
@@ -1519,9 +1662,25 @@ impl CodeTuiApp {
         let attachment = build_pending_attachment(&path)?;
         let name = attachment.name.clone();
         let kind = attachment_kind_label(&attachment);
+        let is_image = attachment.is_image();
         self.draft_attachments.push(attachment);
-        self.notice = Some((MUTED(), format!("Queued {kind}: {name}")));
+        let base = format!("Queued {kind}: {name}");
+        self.notice = Some((MUTED(), self.with_vision_attach_hint(base, is_image)));
         Ok(())
+    }
+
+    /// Announce the describer at attach time, not at send time.
+    pub(super) fn with_vision_attach_hint(&self, base: String, is_image: bool) -> String {
+        if !is_image || self.model_image_input != Some(false) {
+            return base;
+        }
+        match self.describer_status().label() {
+            Some(describer) => format!(
+                "{base} · will be described via {describer} ({} can't see images)",
+                self.model
+            ),
+            None => base,
+        }
     }
 
     pub(super) fn detach_attachment(&mut self, index: usize) -> Result<()> {
@@ -2186,7 +2345,7 @@ impl CodeTuiApp {
             self.notice = Some((MUTED(), "no session history to consolidate yet".to_string()));
             return;
         };
-        let (base, auth) = match self.start_agent_serve().await {
+        let (base, auth) = match self.start_agent_serve(None).await {
             Ok(t) => t,
             Err(e) => {
                 self.notice = Some((ERROR(), format!("memory dream serve failed: {e}")));
@@ -2240,7 +2399,7 @@ impl CodeTuiApp {
         let Some(input) = crate::agent::memory::build_dream_input(cwd) else {
             return;
         };
-        let (router, auth) = Self::build_agent_serve_router(&key, &session_store).await;
+        let (router, auth) = Self::build_agent_serve_router(&key, &session_store, None).await;
         let Ok((handle, shutdown, port)) = router.start_background_with_addr("127.0.0.1", 0).await
         else {
             return;
@@ -3636,15 +3795,38 @@ pieces and keep going"
 /// tool steps — which `seed_history` can't replay as real tool messages (no call
 /// IDs) — are folded into compact assistant notes (`[used read_file: a.rs → 3
 /// lines]`) so the engine remembers what it already did instead of going amnesiac
-/// about its own prior work.
-pub(super) fn agent_seed_turns(history: &[ChatMessage]) -> Vec<(String, String)> {
+/// about its own prior work. Image attachments (which the seed can't carry as
+/// pixels) ride along as their cached description, else a placeholder note.
+pub(super) fn agent_seed_turns(
+    history: &[ChatMessage],
+    descriptions: &std::collections::HashMap<String, String>,
+) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < history.len() {
         let m = &history[i];
         match m.role.as_str() {
             "user" | "assistant" if !m.content.trim().is_empty() => {
-                out.push((m.role.clone(), m.content.clone()));
+                let mut content = m.content.clone();
+                for a in &m.attachments {
+                    if !a.is_image() {
+                        continue;
+                    }
+                    let described = match &a.storage {
+                        AttachmentStorage::Inline { data } => {
+                            descriptions.get(&crate::services::vision_describe::image_hash(data))
+                        }
+                        AttachmentStorage::FileRef { .. } => None,
+                    };
+                    match described {
+                        Some(text) => content.push_str(&format!("\n\n{text}")),
+                        None => content.push_str(&format!(
+                            "\n\n[image attached: {} — not available to this model]",
+                            a.name
+                        )),
+                    }
+                }
+                out.push((m.role.clone(), content));
             }
             "tool_call" => {
                 let (name, args) = decode_tool_call(&m.content);

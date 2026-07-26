@@ -527,8 +527,10 @@ impl CodeTuiApp {
             ClipboardPayload::Attachment(attachment) => {
                 let kind = attachment_kind_label(&attachment);
                 let name = attachment.name.clone();
+                let is_image = attachment.is_image();
                 self.draft_attachments.push(attachment);
-                self.notice = Some((MUTED(), format!("Pasted {kind}: {name}")));
+                let base = format!("Pasted {kind}: {name}");
+                self.notice = Some((MUTED(), self.with_vision_attach_hint(base, is_image)));
             }
             ClipboardPayload::Empty => {
                 self.notice = Some((MUTED(), "Clipboard is empty".to_string()));

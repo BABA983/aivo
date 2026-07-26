@@ -315,7 +315,7 @@ async fn test_config_overlay_toggles_thinking() {
     assert_eq!(app.config_segments(ConfigSetting::Thinking).active, 0);
 
     // Advancing the switch flips the live flag (off is segment 1).
-    app.cycle_config_setting(idx).await;
+    app.cycle_config_setting(idx, CycleDir::Enter).await;
     assert!(!app.thinking_enabled);
     assert_eq!(app.config_segments(ConfigSetting::Thinking).active, 1);
 }
@@ -334,7 +334,7 @@ async fn test_config_overlay_cycles_theme() {
     };
     assert_eq!(state.items[0].setting, ConfigSetting::Theme);
 
-    app.cycle_config_setting(0).await;
+    app.cycle_config_setting(0, CycleDir::Enter).await;
     assert_eq!(app.theme, UiTheme::Light);
     assert_eq!(ui_theme(), UiTheme::Light);
     assert_eq!(TEXT(), Palette::LIGHT.text);
@@ -363,7 +363,7 @@ async fn test_config_overlay_cycles_theme() {
         );
     }
 
-    app.cycle_config_setting(0).await;
+    app.cycle_config_setting(0, CycleDir::Enter).await;
     assert_eq!(app.theme, UiTheme::Dark);
     assert_eq!(ui_theme(), UiTheme::Dark);
 }
@@ -397,7 +397,7 @@ async fn test_config_overlay_toggles_agent_tools() {
         .expect("Agent tools row present");
     assert_eq!(app.config_segments(ConfigSetting::AgentTools).active, 0);
 
-    app.cycle_config_setting(idx).await;
+    app.cycle_config_setting(idx, CycleDir::Enter).await;
     assert!(!app.agent_tools_enabled);
     assert_eq!(app.config_segments(ConfigSetting::AgentTools).active, 1);
 }
@@ -568,7 +568,9 @@ async fn test_loading_picker_backdrop_click_closes() {
     app.overlay = Overlay::Picker(Box::new(PickerState::loading(
         "Select model",
         String::new(),
-        PickerKind::Key,
+        PickerKind::Key {
+            target: KeySelectionTarget::Switch,
+        },
     )));
 
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();

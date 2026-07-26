@@ -700,6 +700,8 @@ pub(crate) struct CodeTuiParams {
     pub share: bool,
     /// `--auto-approve`: pre-set the toggle at launch (session-only; Shift+Tab reverts).
     pub auto_approve: bool,
+    /// `--vision-model [key::]model`: session-only describer, not persisted.
+    pub vision_model: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1346,6 +1348,17 @@ pub(super) enum ConfigSetting {
     Approval,
     UseWebSearch,
     AgentTools,
+    /// Describe images for text-only models (`gateway` / `custom` / `off`).
+    VisionFallback,
+}
+
+/// `Enter` also drills in: the vision row re-opens the describer picker instead
+/// of advancing off an active `custom`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CycleDir {
+    Enter,
+    Next,
+    Prev,
 }
 
 /// The segmented values a `/config` row can hold and which one is live. Read live
@@ -1362,7 +1375,8 @@ pub(super) struct ConfigSegments {
 pub(super) struct ConfigRow {
     pub(super) setting: ConfigSetting,
     pub(super) label: &'static str,
-    pub(super) description: &'static str,
+    /// Owned — the Vision row folds live state into its description.
+    pub(super) description: String,
 }
 
 /// The `/config` overlay: a fixed list of segmented switches. ↑/↓ move rows, ←/→
@@ -1374,13 +1388,17 @@ pub(super) struct ConfigOverlay {
 }
 
 impl ConfigOverlay {
+    /// Wraps: the list is short, so cycling beats a dead stop.
     pub(super) fn select_prev(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        if self.items.is_empty() {
+            return;
+        }
+        self.selected = self.selected.checked_sub(1).unwrap_or(self.items.len() - 1);
     }
 
     pub(super) fn select_next(&mut self) {
         if !self.items.is_empty() {
-            self.selected = (self.selected + 1).min(self.items.len() - 1);
+            self.selected = (self.selected + 1) % self.items.len();
         }
     }
 }
@@ -1532,6 +1550,37 @@ impl Overlay {
     }
 }
 
+pub(super) use crate::services::vision_describe::DescriberSource;
+
+/// Whether the vision fallback can cover this turn, and if not why — the one
+/// place that policy is decided. Resolving `OwnKey` is deferred to dispatch.
+pub(super) enum DescriberStatus {
+    Gateway,
+    OwnKey {
+        key_id: String,
+        model: String,
+    },
+    Off,
+    /// Gateway quota/auth exhausted for the rest of the session.
+    Exhausted,
+    /// `custom` selected with no usable pair — unset, or equal to the active
+    /// model (which the per-model upstream would route back into the main chat).
+    Unconfigured,
+    /// Launch-bound OAuth/ACP key: no loopback router for the describe call.
+    NotAgentCapable,
+}
+
+impl DescriberStatus {
+    /// Attach-time describer label, or `None` when the fallback can't cover.
+    pub(super) fn label(&self) -> Option<&str> {
+        match self {
+            Self::Gateway => Some("aivo"),
+            Self::OwnKey { model, .. } => Some(model),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum PickerValue {
     Model(String),
@@ -1588,6 +1637,14 @@ pub(super) enum PlanCarry {
 pub(super) enum ModelSelectionTarget {
     CurrentChat,
     KeySwitch(ApiKey),
+    VisionDescriber(ApiKey),
+}
+
+/// What picking a key is for; `VisionDescriber` chains into a model picker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum KeySelectionTarget {
+    Switch,
+    VisionDescriber,
 }
 
 #[derive(Clone)]
@@ -1597,7 +1654,9 @@ pub(super) enum PickerKind {
         target: ModelSelectionTarget,
         auto_accept_exact: bool,
     },
-    Key,
+    Key {
+        target: KeySelectionTarget,
+    },
     Session,
     Rewind,
     Effort,
@@ -2549,6 +2608,16 @@ pub(super) enum RuntimeEvent {
         /// provider reported no usage.
         context_tokens: u64,
     },
+    /// One image described; mirrored into the session cache.
+    ImageDescribed {
+        hash: String,
+        text: String,
+    },
+    /// Describe failed before the turn's first request (see
+    /// `abort_undispatched_turn`).
+    DescribeFailed {
+        message: String,
+    },
     /// A `!cmd` local shell run produced one output line — appended to the live
     /// in-progress run and shown immediately in the transcript tail.
     LocalCommandLine {
@@ -3024,6 +3093,13 @@ pub(super) struct CodeTuiApp {
     /// Snapshot vision support, cached on each model resolve. `Some(false)` =
     /// text-only (image sends refused pre-flight); `None` = unknown (let through).
     pub(super) model_image_input: Option<bool>,
+    /// Vision fallback mode (`/config`, `--vision-model`); persisted in code-prefs.
+    pub(super) vision_fallback: crate::services::session_store::VisionFallbackMode,
+    /// Custom describer `(key_id, model)` for `VisionFallbackMode::Custom`.
+    pub(super) vision_fallback_custom: Option<(String, String)>,
+    /// Image-hash → described text, mirrored from the engine so descriptions
+    /// survive engine rebuilds (key/model switch, /new).
+    pub(super) vision_descriptions: std::collections::HashMap<String, String>,
     /// Parsed Cursor effort tier for the footer badge (`None` for non-cursor or
     /// bare ids); set in `refresh_context_window`.
     pub(super) cursor_effort_label: Option<String>,
@@ -3435,6 +3511,9 @@ impl CodeTuiApp {
             theme: UiTheme::Dark,
             model_supports_thinking: false,
             model_image_input: None,
+            vision_fallback: crate::services::session_store::VisionFallbackMode::default(),
+            vision_fallback_custom: None,
+            vision_descriptions: std::collections::HashMap::new(),
             cursor_effort_label: None,
             reasoning_effort: None,
             model_reasoning_efforts: Vec::new(),

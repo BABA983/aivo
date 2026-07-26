@@ -117,6 +117,7 @@ pub mod tool_call_accumulator;
 pub mod transform_mode;
 pub mod update_check;
 pub mod usage_stats_store;
+pub mod vision_describe;
 pub mod wire_format;
 
 pub use ai_launcher::AILauncher;

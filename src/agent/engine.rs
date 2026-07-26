@@ -484,6 +484,11 @@ pub struct AgentEngine {
     /// `tool_call_id`, so the summary fold sees real content instead of stubs.
     /// In-memory only; dropped at each fold and on `/clear`.
     pub(crate) snipped_originals: std::collections::HashMap<String, String>,
+    /// Image-hash → described text, wrapper-formatted; in-memory only.
+    pub(crate) image_descriptions: std::collections::HashMap<String, String>,
+    /// Set per turn when the active model can't see images. `self.messages` keeps
+    /// the real images, so switching to a vision model resends them untouched.
+    pub(crate) substitute_images: bool,
 }
 
 /// Calibrated chars/4 breakdown of what fills the context window, for `/context`.
@@ -566,6 +571,7 @@ mod subagent;
 mod tool_batch;
 mod turn;
 
+pub(crate) use conversation::substitute_image_parts;
 use subagent::*;
 
 /// Drive one agent session: a one-shot task, or an interactive REPL when none is

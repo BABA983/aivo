@@ -424,6 +424,7 @@ impl CodeCommand {
         max_output_tokens: Option<u64>,
         max_cost: Option<f64>,
         auto_approve: bool,
+        vision_model: Option<String>,
     ) -> ExitCode {
         match self
             .execute_internal(
@@ -444,6 +445,7 @@ impl CodeCommand {
                 max_output_tokens,
                 max_cost,
                 auto_approve,
+                vision_model,
             )
             .await
         {
@@ -475,6 +477,7 @@ impl CodeCommand {
         max_output_tokens: Option<u64>,
         max_cost: Option<f64>,
         auto_approve: bool,
+        vision_model: Option<String>,
     ) -> Result<ExitCode> {
         if (max_steps.is_some() || max_output_tokens.is_some()) && !agent_mode {
             anyhow::bail!("--max-steps and --max-output-tokens may only be used with -e/--exec");
@@ -1010,6 +1013,7 @@ impl CodeCommand {
             max_context,
             share,
             auto_approve,
+            vision_model,
         })
         .await?;
 
@@ -1108,6 +1112,10 @@ impl CodeCommand {
         );
         print_opt("--share", "Share this session live (needs `aivo login`)");
         print_opt("--attach <path>", "Attach a file or image to the message");
+        print_opt(
+            "--vision-model [[key::]m]",
+            "Vision model that describes images for text-only models (bare/key:: = picker)",
+        );
         print_opt("--json", "Raw provider JSON (with -p)");
         print_opt(
             "--output-format <fmt>",
@@ -1519,7 +1527,7 @@ async fn materialize_attachment(attachment: &MessageAttachment) -> Result<Messag
     match &attachment.storage {
         AttachmentStorage::Inline { .. } => Ok(attachment.clone()),
         AttachmentStorage::FileRef { path } => {
-            let is_image = attachment.mime_type.starts_with("image/");
+            let is_image = attachment.is_image();
             let is_document = is_document_mime(&attachment.mime_type);
             let storage = if is_image || is_document {
                 let bytes = tokio::fs::read(path)
@@ -2954,6 +2962,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
             .await;
 

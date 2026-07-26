@@ -1127,9 +1127,7 @@ pub fn ensure_image_attachments_supported(
 }
 
 fn first_image_attachment(attachments: &[MessageAttachment]) -> Option<&MessageAttachment> {
-    attachments
-        .iter()
-        .find(|a| a.mime_type.starts_with("image/"))
+    attachments.iter().find(|a| a.is_image())
 }
 
 /// Build the `session/prompt` content blocks for one user turn.
@@ -1146,7 +1144,7 @@ fn first_image_attachment(attachments: &[MessageAttachment]) -> Option<&MessageA
 pub fn build_prompt_blocks(text: &str, attachments: &[MessageAttachment]) -> Result<Vec<Value>> {
     let mut image_blocks = Vec::with_capacity(attachments.len());
     for att in attachments {
-        if att.mime_type.starts_with("image/") {
+        if att.is_image() {
             image_blocks.push(image_block_from_attachment(att)?);
         }
         // Non-image attachments are silently skipped for now; the chat layer

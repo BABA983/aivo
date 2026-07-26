@@ -517,7 +517,7 @@ pub(super) fn should_add_message_spacing(previous_role: Option<&str>, next_role:
 }
 
 pub(super) fn attachment_kind_label(attachment: &MessageAttachment) -> &'static str {
-    if attachment.mime_type.starts_with("image/") {
+    if attachment.is_image() {
         "image"
     } else {
         "file"

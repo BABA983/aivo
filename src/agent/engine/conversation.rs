@@ -3,6 +3,9 @@
 
 use super::*;
 
+use crate::agent::tokens;
+use crate::services::vision_describe;
+
 impl AgentEngine {
     /// `/clear`: drop the conversation, keep the system prompt. Also clears the
     /// compaction working set, else a cleared session would re-inject stale facts.
@@ -333,7 +336,37 @@ impl AgentEngine {
                 *content = append_running_jobs_reminder(owned, &running);
             }
         }
+        if self.substitute_images {
+            substitute_image_parts(&mut out, &self.image_descriptions);
+        }
         out
+    }
+
+    /// Uncached image parts in the history plus `pending`, deduped by hash.
+    pub(crate) fn undescribed_images(&self, pending: Option<&Value>) -> Vec<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        let mut todo = Vec::new();
+        let history = self.messages.iter().filter_map(|m| m.get("content"));
+        for content in history.chain(pending) {
+            let Value::Array(parts) = content else {
+                continue;
+            };
+            for part in parts.iter().filter(|p| tokens::is_image_part(p)) {
+                let Some(url) = part["image_url"]["url"].as_str() else {
+                    continue;
+                };
+                // Hash the raw base64 payload — attachments (no data: prefix) key identically.
+                let Some((_, data)) = vision_describe::parse_data_url(url) else {
+                    continue;
+                };
+                let hash = vision_describe::image_hash(data);
+                if self.image_descriptions.contains_key(&hash) || !seen.insert(hash.clone()) {
+                    continue;
+                }
+                todo.push((hash, url.to_string()));
+            }
+        }
+        todo
     }
 
     /// Record the paths the turn's yet-unrecorded segment changed into its
@@ -462,5 +495,31 @@ true}}.</system-reminder>",
             Value::Array(parts)
         }
         other => other,
+    }
+}
+
+/// A miss leaves the part untouched, so the provider error surfaces normally
+/// instead of an image silently vanishing from the request.
+pub(crate) fn substitute_image_parts(
+    messages: &mut [Value],
+    cache: &std::collections::HashMap<String, String>,
+) {
+    if cache.is_empty() {
+        return;
+    }
+    for m in messages {
+        let Some(Value::Array(parts)) = m.get_mut("content") else {
+            continue;
+        };
+        for part in parts.iter_mut().filter(|p| tokens::is_image_part(p)) {
+            let Some(text) = part["image_url"]["url"]
+                .as_str()
+                .and_then(vision_describe::parse_data_url)
+                .and_then(|(_, data)| cache.get(&vision_describe::image_hash(data)))
+            else {
+                continue;
+            };
+            *part = json!({"type": "text", "text": text});
+        }
     }
 }

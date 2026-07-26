@@ -1028,6 +1028,16 @@ pub struct CodeArgs {
     )]
     pub key: Option<String>,
 
+    /// Vision model that describes images for a text-only active model; bare or
+    /// `key::` opens a picker. Session-only (persistent choice: /config).
+    #[arg(
+        long,
+        value_name = "[KEY::]MODEL",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    pub vision_model: Option<String>,
+
     /// Bypass cache and fetch fresh model list for the model picker
     #[arg(short = 'r', long)]
     pub refresh: bool,

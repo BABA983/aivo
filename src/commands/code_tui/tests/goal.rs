@@ -585,6 +585,8 @@ async fn test_goal_start_cleared_when_dispatch_refuses() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     app.model_image_input = Some(false); // snapshot says text-only
+    // Off, else the fallback would rescue it.
+    app.vision_fallback = crate::services::session_store::VisionFallbackMode::Off;
     app.draft_attachments.push(MessageAttachment {
         name: "shot.png".to_string(),
         mime_type: "image/png".to_string(),

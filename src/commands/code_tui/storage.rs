@@ -227,22 +227,27 @@ pub(super) fn draft_history_path() -> PathBuf {
     crate::services::paths::chat_history(&crate::services::paths::config_dir())
 }
 
+/// Returns whether the composer was actually refilled — a draft the user typed
+/// mid-turn wins over the failed submission (and blocks an auto-retry).
 pub(super) fn restore_cancelled_submission(
     history: &mut Vec<ChatMessage>,
     draft: &mut String,
     draft_attachments: &mut Vec<MessageAttachment>,
     pending_submit: &mut Option<PendingSubmission>,
-) {
-    if let Some(submitted) = pending_submit.take()
-        && draft.is_empty()
-    {
-        *draft = submitted.content;
-        *draft_attachments = submitted.attachments;
-    }
+) -> bool {
+    let restored = match pending_submit.take() {
+        Some(submitted) if draft.is_empty() => {
+            *draft = submitted.content;
+            *draft_attachments = submitted.attachments;
+            true
+        }
+        _ => false,
+    };
 
     if history.last().is_some_and(|message| message.role == "user") {
         history.pop();
     }
+    restored
 }
 
 /// Only user/assistant prose makes a readable title/preview. Agent turns also

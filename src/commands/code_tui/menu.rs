@@ -286,7 +286,7 @@ pub(super) fn picker_current_label(label: String, is_current: bool) -> String {
 
 pub(super) fn picker_kind_noun(kind: &PickerKind) -> &'static str {
     match kind {
-        PickerKind::Key => "keys",
+        PickerKind::Key { .. } => "keys",
         PickerKind::Model { .. } => "models",
         PickerKind::Session => "sessions",
         PickerKind::Rewind => "turns",
@@ -297,7 +297,7 @@ pub(super) fn picker_kind_noun(kind: &PickerKind) -> &'static str {
 
 pub(super) fn picker_search_placeholder(kind: &PickerKind) -> &'static str {
     match kind {
-        PickerKind::Key => "filter key name or endpoint",
+        PickerKind::Key { .. } => "filter key name or endpoint",
         PickerKind::Model { .. } => "filter model names",
         PickerKind::Session => "filter saved sessions",
         PickerKind::Rewind => "filter turns",
@@ -313,6 +313,16 @@ pub(super) fn key_search_text(key: &ApiKey) -> String {
         key.display_name(),
         footer_host_label(&key.base_url)
     )
+}
+
+pub(super) fn key_picker_items(keys: Vec<ApiKey>) -> Vec<PickerEntry> {
+    keys.into_iter()
+        .map(|key| PickerEntry {
+            label: format!("{} · {}", key.display_name(), key.base_url),
+            search_text: key_search_text(&key),
+            value: PickerValue::Key(key),
+        })
+        .collect()
 }
 
 pub(super) fn key_picker_item_line(key: &ApiKey, selected: bool, width: u16) -> Line<'static> {

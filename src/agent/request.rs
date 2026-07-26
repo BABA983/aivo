@@ -55,6 +55,25 @@ pub(crate) fn content_str(m: &Value) -> String {
         .to_string()
 }
 
+/// Multimodal-aware [`content_str`]: image-bearing turns would otherwise
+/// serialize empty.
+pub(crate) fn content_text(m: &Value) -> String {
+    match m.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .map(|p| match p.get("type").and_then(|t| t.as_str()) {
+                Some("text") => p.get("text").and_then(|t| t.as_str()).unwrap_or(""),
+                Some("image_url") => "[image]",
+                _ => "",
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 pub(crate) fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -69,7 +88,7 @@ pub(crate) fn serialize_transcript(messages: &[Value]) -> String {
     let mut out = String::new();
     for m in messages {
         match role(m) {
-            "user" => out.push_str(&format!("[User]: {}\n", content_str(m))),
+            "user" => out.push_str(&format!("[User]: {}\n", content_text(m))),
             "assistant" => {
                 let c = content_str(m);
                 if !c.is_empty() {
@@ -124,5 +143,30 @@ mod tests {
         assert_eq!(truncate_str("abc", 5), "abc");
         let out = truncate_str("abcdefgh", 3);
         assert!(out.starts_with("abc…") && out.contains("+5 chars"));
+    }
+
+    #[test]
+    fn content_text_flattens_multimodal() {
+        let m = json!({"role":"user","content":[
+            {"type":"text","text":"look at this"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,x"}},
+        ]});
+        assert_eq!(content_text(&m), "look at this\n[image]");
+        assert_eq!(
+            content_text(&json!({"role":"user","content":"plain"})),
+            "plain"
+        );
+        assert_eq!(content_text(&json!({"role":"user"})), "");
+    }
+
+    #[test]
+    fn serialize_transcript_keeps_multimodal_user_turns() {
+        let messages = vec![json!({"role":"user","content":[
+            {"type":"text","text":"what is in the screenshot?"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,x"}},
+        ]})];
+        let t = serialize_transcript(&messages);
+        assert!(t.contains("[User]: what is in the screenshot?"), "{t}");
+        assert!(t.contains("[image]"), "{t}");
     }
 }

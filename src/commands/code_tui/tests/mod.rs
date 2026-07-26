@@ -24,3 +24,4 @@ mod stream_tail;
 mod thinking;
 mod tools_render;
 mod turn_lifecycle;
+mod vision;

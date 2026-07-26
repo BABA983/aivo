@@ -240,6 +240,11 @@ impl CodeTuiApp {
                     reply,
                 });
             }
+            RuntimeEvent::ImageDescribed { hash, text } => {
+                // Session-lifetime mirror of the engine cache — survives rebuilds.
+                self.vision_descriptions.insert(hash, text);
+            }
+            RuntimeEvent::DescribeFailed { message } => self.abort_undispatched_turn(message),
             RuntimeEvent::AgentFinished {
                 steps,
                 tokens,
@@ -1265,7 +1270,7 @@ impl CodeTuiApp {
 
         match result {
             Ok(turn) => self.finish_successful_response(turn).await?,
-            Err(err) => self.finish_failed_response(err),
+            Err(err) => self.finish_failed_response(err).await,
         }
 
         // Keep the `/` menu in sync with any skills added/edited during the turn
@@ -1436,18 +1441,65 @@ impl CodeTuiApp {
         Ok(())
     }
 
-    fn finish_failed_response(&mut self, err: String) {
-        self.pending_response.clear();
-        self.incoming_buffer.clear();
-        self.pending_finish = None;
-        self.pending_reasoning.clear();
+    /// A pre-send failure (vision describe): the engine never consumed the turn.
+    pub(super) fn abort_undispatched_turn(&mut self, message: String) {
+        self.stop_agent_serve();
+        self.response_task = None;
         restore_cancelled_submission(
             &mut self.history,
             &mut self.draft,
             &mut self.draft_attachments,
             &mut self.pending_submit,
         );
+        // The row flagged engine-dispatched at spawn was just popped.
+        self.agent_turn_indices.retain(|&i| i < self.history.len());
+        self.sending = false;
+        self.request_started_at = None;
+        self.retrying = false;
+        self.notice = Some((ERROR(), message));
+    }
+
+    pub(super) async fn finish_failed_response(&mut self, err: String) {
+        self.pending_response.clear();
+        self.incoming_buffer.clear();
+        self.pending_finish = None;
+        self.pending_reasoning.clear();
+        let restored = restore_cancelled_submission(
+            &mut self.history,
+            &mut self.draft,
+            &mut self.draft_attachments,
+            &mut self.pending_submit,
+        );
+        // e.g. `aivo/starter`, text-only upstream but snapshot-unknown. Loop-safe:
+        // with `Some(false)` the retry can't take this path again.
+        if is_image_input_rejection(&err) && self.model_image_input != Some(false) {
+            self.model_image_input = Some(false);
+            if restored && self.retry_via_vision_fallback().await {
+                return;
+            }
+        }
         self.notice = Some((ERROR(), reframe_image_input_error(err, &self.model)));
+    }
+
+    /// `false` leaves the composer untouched for the caller's error notice.
+    async fn retry_via_vision_fallback(&mut self) -> bool {
+        if !self.draft_attachments.iter().any(|a| a.is_image())
+            || self.describer_status().label().is_none()
+        {
+            return false;
+        }
+        let retry = self.draft.clone();
+        if self.dispatch_user_message(retry, None).await.is_err() || !self.sending {
+            return false;
+        }
+        self.notice = Some((
+            MUTED(),
+            format!(
+                "{} can't read images — retrying with the vision fallback…",
+                self.model
+            ),
+        ));
+        true
     }
 
     async fn apply_loaded_models(
@@ -1475,6 +1527,25 @@ impl CodeTuiApp {
         if !matches!(picker.kind, PickerKind::Model { .. }) {
             return None;
         }
+        let describer_key = match &picker.kind {
+            PickerKind::Model {
+                target: ModelSelectionTarget::VisionDescriber(key),
+                ..
+            } => Some(key.id.clone()),
+            _ => None,
+        };
+        let models = if describer_key.is_some() {
+            filter_vision_choices(models)
+        } else {
+            models
+        };
+        // Re-picking starts from the current describer.
+        let stored = match (&describer_key, &self.vision_fallback_custom) {
+            (Some(key_id), Some((id, model))) if key_id == id => {
+                models.iter().position(|m| &m.id == model)
+            }
+            _ => None,
+        };
 
         picker.items = models
             .into_iter()
@@ -1485,7 +1556,7 @@ impl CodeTuiApp {
             })
             .collect();
         picker.loading = false;
-        picker.selected = 0;
+        picker.selected = stored.unwrap_or(0);
         picker.exact_match_index()
     }
 
@@ -3090,10 +3161,18 @@ fn is_ctrl_char(event: &Event, ch: char) -> bool {
             && k.modifiers == KeyModifiers::CONTROL)
 }
 
+/// A provider 400 that means "this model can't take image content": the
+/// cross-vendor "image input" wording, or a serde-style deserialize rejection
+/// of the `image_url` content part (aivo's own gateway speaks this one).
+pub(super) fn is_image_input_rejection(err: &str) -> bool {
+    let err = err.to_ascii_lowercase();
+    err.contains("image input") || (err.contains("unknown variant") && err.contains("image_url"))
+}
+
 /// Lead an image-rejection 400 with an actionable line, for models the snapshot
-/// didn't know were text-only. The provider wording is the cross-vendor signal.
+/// didn't know were text-only.
 pub(super) fn reframe_image_input_error(err: String, model: &str) -> String {
-    if err.to_ascii_lowercase().contains("image input") {
+    if is_image_input_rejection(&err) {
         format!(
             "{model} can't read images — switch to a vision model (e.g. /model) and resend.\n{err}"
         )
@@ -3196,4 +3275,33 @@ pub(super) fn parse_sgr_scroll(frag: &str) -> Option<MouseEvent> {
         row: row.saturating_sub(1),
         modifiers: KeyModifiers::NONE,
     })
+}
+
+/// Snapshot-confirmed vision models, cheapest first. The snapshot is sparse, so
+/// a catalog with NO confirmed entries falls through unfiltered rather than
+/// showing an empty picker.
+pub(super) fn filter_vision_choices(models: Vec<ModelChoice>) -> Vec<ModelChoice> {
+    let (vision, rest): (Vec<ModelChoice>, Vec<ModelChoice>) =
+        models.into_iter().partition(|m| model_reads_images(&m.id));
+    if vision.is_empty() {
+        return rest;
+    }
+    // Unknown price sorts last; stable, so equal-price models keep catalog order.
+    let price = |id: &str| -> f64 {
+        crate::services::model_metadata::model_pricing(id)
+            .and_then(|p| match (p.input, p.output) {
+                (None, None) => None,
+                (i, o) => Some(i.unwrap_or(0.0) + o.unwrap_or(0.0)),
+            })
+            .unwrap_or(f64::MAX)
+    };
+    let mut keyed: Vec<(f64, ModelChoice)> =
+        vision.into_iter().map(|m| (price(&m.id), m)).collect();
+    keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+    keyed.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Unknown models answer `false` — the picker won't offer them as describers.
+pub(super) fn model_reads_images(model: &str) -> bool {
+    crate::services::model_metadata::snapshot_limits(model).is_some_and(|l| l.image_input)
 }

@@ -20,3 +20,4 @@ mod subagents;
 mod thinking;
 mod tools_wiring;
 mod turn_loop;
+mod vision_shim;

@@ -22,7 +22,14 @@ enum OverlayKeyAction {
     ApplyMcpPaste,
     /// `/config` row, direction −1/+1.
     StepConfigSetting(usize, i32),
-    CycleConfigSetting(usize),
+    CycleConfigSetting {
+        row: usize,
+        dir: CycleDir,
+    },
+}
+
+fn cycle(row: usize, dir: CycleDir) -> OverlayKeyAction {
+    OverlayKeyAction::CycleConfigSetting { row, dir }
 }
 
 const GOAL_STOP_CONFIRM_NOTICE: &str = "Press Esc again to stop goal mode";
@@ -743,8 +750,8 @@ impl CodeTuiApp {
                 self.step_config_setting(row, dir).await;
                 Ok(Some(false))
             }
-            OverlayKeyAction::CycleConfigSetting(row) => {
-                self.cycle_config_setting(row).await;
+            OverlayKeyAction::CycleConfigSetting { row, dir } => {
+                self.cycle_config_setting(row, dir).await;
                 Ok(Some(false))
             }
         }
@@ -860,8 +867,17 @@ impl CodeTuiApp {
                     KeyCode::Right if has_rows => {
                         return OverlayKeyAction::StepConfigSetting(state.selected, 1);
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Tab if has_rows => {
-                        return OverlayKeyAction::CycleConfigSetting(state.selected);
+                    KeyCode::Enter if has_rows => {
+                        return cycle(state.selected, CycleDir::Enter);
+                    }
+                    // BackTab, or Tab+SHIFT on some terminals; must precede the
+                    // plain-Tab arm.
+                    KeyCode::BackTab if has_rows => return cycle(state.selected, CycleDir::Prev),
+                    KeyCode::Tab if has_rows && key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        return cycle(state.selected, CycleDir::Prev);
+                    }
+                    KeyCode::Char(' ') | KeyCode::Tab if has_rows => {
+                        return cycle(state.selected, CycleDir::Next);
                     }
                     _ => {}
                 }
@@ -1229,14 +1245,22 @@ impl CodeTuiApp {
             Overlay::Picker(picker) => {
                 if picker.loading {
                     if matches!(key.code, KeyCode::Esc) {
-                        self.overlay = Overlay::None;
+                        if picker_returns_to_config(&picker.kind) {
+                            self.open_config_overlay_at_vision();
+                        } else {
+                            self.overlay = Overlay::None;
+                        }
                     }
                     return OverlayKeyAction::Handled;
                 }
 
                 match key.code {
                     KeyCode::Esc => {
-                        self.overlay = Overlay::None;
+                        if picker_returns_to_config(&picker.kind) {
+                            self.open_config_overlay_at_vision();
+                        } else {
+                            self.overlay = Overlay::None;
+                        }
                         OverlayKeyAction::Handled
                     }
                     KeyCode::Up => {
@@ -1436,8 +1460,9 @@ impl CodeTuiApp {
         }
 
         // Shift+Tab cycles the agent mode (normal → auto-approve → plan) —
-        // aligned with Claude Code's Shift+Tab permission-mode cycle.
-        if is_auto_approve_toggle(key) {
+        // aligned with Claude Code's Shift+Tab permission-mode cycle. With the
+        // /config overlay open it belongs to the overlay (reverse value cycle).
+        if is_auto_approve_toggle(key) && !matches!(self.overlay, Overlay::Config(_)) {
             self.cycle_agent_mode().await;
             return Ok(Some(false));
         }
@@ -1700,4 +1725,18 @@ fn apply_detail_scroll(scroll: &mut u16, key: KeyEvent, ctrl: bool) {
         KeyCode::End => u16::MAX,
         _ => *scroll,
     };
+}
+
+/// Vision-describer pickers are a drill-in from `/config` — closing them
+/// returns there instead of dropping to the composer.
+fn picker_returns_to_config(kind: &PickerKind) -> bool {
+    matches!(
+        kind,
+        PickerKind::Key {
+            target: KeySelectionTarget::VisionDescriber,
+        } | PickerKind::Model {
+            target: ModelSelectionTarget::VisionDescriber(_),
+            ..
+        }
+    )
 }

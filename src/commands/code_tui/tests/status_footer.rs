@@ -883,7 +883,7 @@ async fn test_agent_error_persists_in_transcript() {
     );
     // Never seeded back to the model on an engine rebuild.
     assert!(
-        super::super::runtime_impl::agent_seed_turns(&app.history).is_empty(),
+        super::super::runtime_impl::agent_seed_turns(&app.history, &Default::default()).is_empty(),
         "error entries must stay display-only"
     );
 }

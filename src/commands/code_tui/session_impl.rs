@@ -9,8 +9,12 @@ impl CodeTuiApp {
         auto_accept_exact: bool,
     ) {
         let query = query.unwrap_or_default();
+        let title = match &target {
+            ModelSelectionTarget::VisionDescriber(_) => "Describer model (reads images)",
+            _ => "Select model",
+        };
         self.overlay = Overlay::Picker(Box::new(PickerState::loading(
-            "Select model",
+            title,
             query,
             PickerKind::Model {
                 target,
@@ -371,22 +375,75 @@ is preserved."
             return Ok(());
         }
 
-        let items = keys
-            .into_iter()
-            .map(|key| PickerEntry {
-                label: format!("{} · {}", key.display_name(), key.base_url),
-                search_text: key_search_text(&key),
-                value: PickerValue::Key(key),
-            })
-            .collect();
-
         self.overlay = Overlay::Picker(Box::new(PickerState::ready(
             "Keys",
             query.unwrap_or_default(),
-            items,
-            PickerKind::Key,
+            key_picker_items(keys),
+            PickerKind::Key {
+                target: KeySelectionTarget::Switch,
+            },
         )));
         Ok(())
+    }
+
+    pub(super) async fn open_vision_picker_for_key(&mut self, query: &str) {
+        match super::resolve_describer_key(&self.session_store, query).await {
+            Ok(key) => self.open_describer_model_picker(key),
+            Err(message) => self.notice = Some((ERROR(), message)),
+        }
+    }
+
+    /// Picker items carry encrypted secrets (`get_keys`), but the live model
+    /// fetch has to authenticate with the real one.
+    fn open_describer_model_picker(&mut self, mut key: ApiKey) {
+        if let Err(e) = SessionStore::decrypt_key_secret(&mut key) {
+            self.notice = Some((ERROR(), format!("couldn't unlock key: {e}")));
+            return;
+        }
+        self.open_model_picker(None, ModelSelectionTarget::VisionDescriber(key), false);
+    }
+
+    /// One eligible key skips straight to the model stage; the stored describer
+    /// pre-selects.
+    pub(super) async fn open_vision_key_picker(&mut self) {
+        let keys = match self.session_store.get_keys().await {
+            Ok(keys) => keys,
+            Err(e) => {
+                self.notice = Some((ERROR(), format!("couldn't read keys: {e}")));
+                return;
+            }
+        };
+        let mut eligible: Vec<ApiKey> = keys
+            .into_iter()
+            .filter(crate::commands::code_agent_oneshot::key_is_agent_capable)
+            .collect();
+        if eligible.is_empty() {
+            self.notice = Some((
+                ERROR(),
+                "No key can serve as a describer (needs an API key, not launch-bound OAuth/ACP)"
+                    .to_string(),
+            ));
+            return;
+        }
+        if eligible.len() == 1 {
+            self.open_describer_model_picker(eligible.remove(0));
+            return;
+        }
+        let stored_key = self
+            .vision_fallback_custom
+            .as_ref()
+            .and_then(|(id, _)| eligible.iter().position(|k| &k.id == id))
+            .unwrap_or(0);
+        let mut picker = PickerState::ready(
+            "Describer key",
+            String::new(),
+            key_picker_items(eligible),
+            PickerKind::Key {
+                target: KeySelectionTarget::VisionDescriber,
+            },
+        );
+        picker.selected = stored_key;
+        self.overlay = Overlay::Picker(Box::new(picker));
     }
 
     pub(super) async fn open_resume_picker(&mut self, query: Option<String>) -> Result<()> {
@@ -588,7 +645,10 @@ is preserved."
         if let Some(conversation) = self.pending_agent_messages.clone() {
             engine.restore_conversation(conversation);
         } else {
-            engine.seed_history(super::runtime_impl::agent_seed_turns(&self.history));
+            engine.seed_history(super::runtime_impl::agent_seed_turns(
+                &self.history,
+                &self.vision_descriptions,
+            ));
         }
         engine.context_report()
     }
@@ -606,31 +666,43 @@ is preserved."
         } else {
             "let the model reason (this model has no thinking)"
         };
+        // Model FIRST — a narrow overlay clips the tail.
+        let vision_desc = match (&self.vision_fallback, &self.vision_fallback_custom) {
+            (crate::services::session_store::VisionFallbackMode::Custom, Some((_, model))) => {
+                format!("{model} describes images · enter re-picks")
+            }
+            _ => "describe images for text-only models · custom picks a key + model".to_string(),
+        };
         let items = vec![
             ConfigRow {
                 setting: ConfigSetting::Theme,
                 label: "Theme",
-                description: "color palette for the whole TUI",
+                description: "color palette for the whole TUI".to_string(),
             },
             ConfigRow {
                 setting: ConfigSetting::Thinking,
                 label: "Thinking",
-                description: thinking_desc,
+                description: thinking_desc.to_string(),
             },
             ConfigRow {
                 setting: ConfigSetting::Approval,
                 label: "Mode",
-                description: "auto-approve runs unattended · review each edit",
+                description: "auto-approve runs unattended · review each edit".to_string(),
             },
             ConfigRow {
                 setting: ConfigSetting::UseWebSearch,
                 label: "Web search",
-                description: "let the agent search the web via aivo (daily quota)",
+                description: "let the agent search the web via aivo (daily quota)".to_string(),
             },
             ConfigRow {
                 setting: ConfigSetting::AgentTools,
                 label: "Agent tools",
-                description: "off = plain chat: no tools, no system prompt",
+                description: "off = plain chat: no tools, no system prompt".to_string(),
+            },
+            ConfigRow {
+                setting: ConfigSetting::VisionFallback,
+                label: "Vision fallback",
+                description: vision_desc,
             },
         ];
         self.overlay = Overlay::Config(ConfigOverlay { items, selected: 0 });
@@ -667,6 +739,17 @@ is preserved."
             }
             ConfigSetting::UseWebSearch => switch(self.web_search_enabled),
             ConfigSetting::AgentTools => switch(self.agent_tools_enabled),
+            ConfigSetting::VisionFallback => {
+                const OPTIONS: &[&str] = &["gateway", "custom", "off"];
+                ConfigSegments {
+                    options: OPTIONS,
+                    active: OPTIONS
+                        .iter()
+                        .position(|o| *o == self.vision_fallback.as_str())
+                        .unwrap_or(0),
+                    is_switch: false,
+                }
+            }
         }
     }
 
@@ -699,17 +782,27 @@ is preserved."
         self.set_config_segment(setting, next).await;
     }
 
-    /// Enter/Space: advance to the next segment, wrapping.
-    pub(super) async fn cycle_config_setting(&mut self, row: usize) {
+    /// Advance to the next segment, wrapping. Enter on an already-active `custom`
+    /// re-opens the describer picker — the way to CHANGE the pick.
+    pub(super) async fn cycle_config_setting(&mut self, row: usize, dir: CycleDir) {
         let Some(setting) = self.config_row_setting(row) else {
             return;
         };
-        let segs = self.config_segments(setting);
-        if segs.options.is_empty() {
+        if dir == CycleDir::Enter
+            && setting == ConfigSetting::VisionFallback
+            && self.vision_fallback == crate::services::session_store::VisionFallbackMode::Custom
+        {
+            self.open_vision_key_picker().await;
             return;
         }
-        let next = (segs.active + 1) % segs.options.len();
-        self.set_config_segment(setting, next).await;
+        let segs = self.config_segments(setting);
+        let len = segs.options.len();
+        if len == 0 {
+            return;
+        }
+        let step = if dir == CycleDir::Prev { len - 1 } else { 1 };
+        self.set_config_segment(setting, (segs.active + step) % len)
+            .await;
     }
 
     /// Apply `setting`'s `target` segment live (+persist); no-op if already active.
@@ -734,6 +827,19 @@ is preserved."
             }
             ConfigSetting::UseWebSearch => self.set_web_search_enabled(target == 0).await,
             ConfigSetting::AgentTools => self.set_agent_tools_enabled(target == 0).await,
+            ConfigSetting::VisionFallback => {
+                use crate::services::session_store::VisionFallbackMode;
+                let mode =
+                    VisionFallbackMode::parse(segs.options.get(target).copied().unwrap_or(""));
+                match mode {
+                    // Unconfigured `custom` opens the key→model picker; the mode
+                    // only flips once something is picked (Esc leaves it as-is).
+                    VisionFallbackMode::Custom if self.vision_fallback_custom.is_none() => {
+                        self.open_vision_key_picker().await
+                    }
+                    mode => self.set_vision_fallback_mode(mode).await,
+                }
+            }
         }
     }
 
@@ -790,6 +896,70 @@ is preserved."
         self.thinking_enabled = on;
         self.show_toast(if on { "Thinking on" } else { "Thinking off" });
         let _ = self.session_store.set_chat_thinking_enabled(on).await;
+    }
+
+    /// `custom` is only ever set with a describer pair in hand (picker flow /
+    /// `--vision-model`), so no pairless guard is needed here.
+    pub(super) async fn set_vision_fallback_mode(
+        &mut self,
+        mode: crate::services::session_store::VisionFallbackMode,
+    ) {
+        use crate::services::session_store::VisionFallbackMode;
+        if self.vision_fallback == mode {
+            return;
+        }
+        self.vision_fallback = mode;
+        let toast = match mode {
+            VisionFallbackMode::Gateway => {
+                "Vision fallback: aivo describes images (daily quota)".to_string()
+            }
+            VisionFallbackMode::Custom => match &self.vision_fallback_custom {
+                Some((_, model)) => format!("Vision fallback: {model} describes images"),
+                None => "Vision fallback: custom describer".to_string(),
+            },
+            VisionFallbackMode::Off => {
+                "Vision fallback off — text-only models refuse images".to_string()
+            }
+        };
+        self.show_toast(toast);
+        let _ = self
+            .session_store
+            .set_chat_vision_fallback(mode, None)
+            .await;
+    }
+
+    pub(super) async fn apply_vision_describer(&mut self, key: ApiKey, model: String) {
+        use crate::services::session_store::VisionFallbackMode;
+        if let Err(message) = super::validate_describer_model(&model, &self.model) {
+            self.open_config_overlay_at_vision();
+            self.notice = Some((ERROR(), message));
+            return;
+        }
+        self.vision_fallback_custom = Some((key.id.clone(), model.clone()));
+        self.vision_fallback = VisionFallbackMode::Custom;
+        let _ = self
+            .session_store
+            .set_chat_vision_fallback(VisionFallbackMode::Custom, Some((&key.id, &model)))
+            .await;
+        self.open_config_overlay_at_vision();
+        self.show_toast(format!(
+            "Vision fallback: {model} via {}",
+            key.display_name()
+        ));
+    }
+
+    /// The describer flow's entry and exit point, so Esc/completion lands back
+    /// where the user started.
+    pub(super) fn open_config_overlay_at_vision(&mut self) {
+        self.open_config_overlay();
+        if let Overlay::Config(state) = &mut self.overlay
+            && let Some(row) = state
+                .items
+                .iter()
+                .position(|i| i.setting == ConfigSetting::VisionFallback)
+        {
+            state.selected = row;
+        }
     }
 
     /// Set the aivo-web-search flag and persist it; the engine applies it next turn.
@@ -2479,9 +2649,25 @@ is preserved."
                 ModelSelectionTarget::KeySwitch(key) => {
                     self.complete_key_switch(key, model).await?
                 }
+                ModelSelectionTarget::VisionDescriber(key) => {
+                    self.apply_vision_describer(key, model).await;
+                }
             },
-            (PickerKind::Key, PickerValue::Key(key)) => {
+            (
+                PickerKind::Key {
+                    target: KeySelectionTarget::Switch,
+                },
+                PickerValue::Key(key),
+            ) => {
                 self.begin_key_switch(key).await?;
+            }
+            (
+                PickerKind::Key {
+                    target: KeySelectionTarget::VisionDescriber,
+                },
+                PickerValue::Key(key),
+            ) => {
+                self.open_describer_model_picker(key);
             }
             (PickerKind::Session, PickerValue::Session(session)) => {
                 self.begin_resume_load(session);
@@ -2586,6 +2772,10 @@ is preserved."
             } => Some(self.key.clone()),
             PickerKind::Model {
                 target: ModelSelectionTarget::KeySwitch(key),
+                ..
+            }
+            | PickerKind::Model {
+                target: ModelSelectionTarget::VisionDescriber(key),
                 ..
             } => Some(key.clone()),
             _ => None,
