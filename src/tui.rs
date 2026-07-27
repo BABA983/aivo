@@ -28,6 +28,13 @@ pub fn picker_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
+/// Gate for the stdout-based line/secret prompts. Deliberately distinct
+/// from `picker_interactive` — pickers render on stderr instead.
+pub fn prompt_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
+}
+
 impl Default for FuzzySelect {
     fn default() -> Self {
         Self::new()
@@ -105,7 +112,7 @@ impl FuzzySelect {
         // Raw mode before hiding the cursor: if either step fails, the
         // guard's Drop (or never having hidden) leaves the terminal intact.
         let _raw_mode = RawModeGuard::enable()?;
-        term.hide_cursor()?;
+        let _cursor = CursorGuard::hide(&term)?;
         let _paste_mode = BracketedPasteGuard::enable().ok();
 
         let mut query = String::new();
@@ -221,7 +228,6 @@ impl FuzzySelect {
                 Ok(key) => key,
                 Err(e) => {
                     let _ = term.clear_last_lines(1 + items_drawn);
-                    let _ = term.show_cursor();
                     return Err(e);
                 }
             };
@@ -249,14 +255,11 @@ impl FuzzySelect {
                             // instead of selecting an unusable item.
                             continue;
                         }
-                        term.show_cursor()?;
                         return Ok(FuzzyOutcome::Selected(orig_idx));
                     }
-                    term.show_cursor()?;
                     return Ok(FuzzyOutcome::Query(filter_query.to_string()));
                 }
                 FuzzyInput::Cancel => {
-                    term.show_cursor()?;
                     return Ok(FuzzyOutcome::Cancelled);
                 }
                 FuzzyInput::Backspace if !query.is_empty() => {
@@ -272,6 +275,197 @@ impl FuzzySelect {
                 _ => {}
             }
         }
+    }
+}
+
+/// Checklist picker: space toggles, `a` toggles all, Enter confirms,
+/// Esc/Ctrl-C cancels. No fuzzy filter — meant for short lists.
+pub struct MultiSelect {
+    prompt: String,
+    items: Vec<String>,
+    checked: Vec<bool>,
+    /// Dim `(note)` suffix — unlike `FuzzySelect::annotations`, it does not
+    /// disable the row.
+    notes: Vec<Option<String>>,
+}
+
+impl Default for MultiSelect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultiSelect {
+    pub fn new() -> Self {
+        Self {
+            prompt: "Select".to_string(),
+            items: Vec::new(),
+            checked: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
+
+    pub fn with_prompt(mut self, prompt: &str) -> Self {
+        self.prompt = prompt.to_string();
+        self
+    }
+
+    pub fn items(mut self, items: &[String]) -> Self {
+        self.items = items.to_vec();
+        self
+    }
+
+    /// Initial checked state; missing entries default to unchecked.
+    pub fn checked(mut self, checked: &[bool]) -> Self {
+        self.checked = checked.to_vec();
+        self
+    }
+
+    pub fn notes(mut self, notes: Vec<Option<String>>) -> Self {
+        self.notes = notes;
+        self
+    }
+
+    fn note(&self, idx: usize) -> Option<&str> {
+        self.notes.get(idx).and_then(Option::as_deref)
+    }
+
+    /// Checked indices on Enter (possibly empty), `None` on cancel.
+    pub fn interact_opt(mut self) -> std::io::Result<Option<Vec<usize>>> {
+        let count = self.items.len();
+        if count == 0 {
+            return Ok(Some(Vec::new()));
+        }
+        self.checked.resize(count, false);
+
+        let term = Term::stderr();
+        let _raw_mode = RawModeGuard::enable()?;
+        let _cursor = CursorGuard::hide(&term)?;
+
+        let mut cursor = 0usize;
+        let mut page_start = 0usize;
+        let page_size = 10;
+
+        loop {
+            if cursor < page_start {
+                page_start = cursor;
+            } else if cursor >= page_start + page_size {
+                page_start = cursor + 1 - page_size;
+            }
+            let end_idx = (page_start + page_size).min(count);
+
+            let term_width = term.size().1 as usize;
+            let n_checked = self.checked.iter().filter(|&&c| c).count();
+            let prompt_line = format!(
+                "{} {}",
+                crate::style::bold(format!("{}:", self.prompt)),
+                crate::style::dim(format!(
+                    "{n_checked}/{count} · space toggle · a all · enter confirm"
+                ))
+            );
+            term.write_line(&truncate_to_width(&prompt_line, term_width))?;
+
+            // Includes the prompt row — must match the clears below.
+            let mut lines_drawn = 1;
+            if page_start > 0 {
+                term.write_line(&format!(
+                    "  {}",
+                    crate::style::dim(format!("↑ {} more above", page_start))
+                ))?;
+                lines_drawn += 1;
+            }
+            for i in page_start..end_idx {
+                let is_cursor = i == cursor;
+                let symbol = if is_cursor {
+                    crate::style::cyan(">")
+                } else {
+                    " ".to_string()
+                };
+                let mark = if self.checked[i] {
+                    crate::style::cyan("[x]")
+                } else {
+                    crate::style::dim("[ ]")
+                };
+                // Strip baked-in ANSI so the muting gray applies uniformly.
+                let styled_item = if !self.checked[i] {
+                    crate::style::gray(console::strip_ansi_codes(&self.items[i]))
+                } else if is_cursor {
+                    crate::style::cyan(&self.items[i])
+                } else {
+                    self.items[i].clone()
+                };
+                let suffix = self
+                    .note(i)
+                    .map(|note| format!("  {}", crate::style::dim(format!("({note})"))))
+                    .unwrap_or_default();
+                let line = format!("{} {} {}{}", symbol, mark, styled_item, suffix);
+                term.write_line(&truncate_to_width(&line, term_width))?;
+                lines_drawn += 1;
+            }
+            if end_idx < count {
+                term.write_line(&format!(
+                    "  {}",
+                    crate::style::dim(format!("↓ {} more below", count - end_idx))
+                ))?;
+                lines_drawn += 1;
+            }
+
+            let input = match read_fuzzy_input() {
+                Ok(key) => key,
+                Err(e) => {
+                    let _ = term.clear_last_lines(lines_drawn);
+                    return Err(e);
+                }
+            };
+
+            term.clear_last_lines(lines_drawn)?;
+
+            match input {
+                FuzzyInput::Previous => {
+                    cursor = if cursor == 0 { count - 1 } else { cursor - 1 };
+                }
+                FuzzyInput::Next => {
+                    cursor = (cursor + 1) % count;
+                }
+                FuzzyInput::Enter => {
+                    let picked = (0..count).filter(|&i| self.checked[i]).collect();
+                    return Ok(Some(picked));
+                }
+                FuzzyInput::Cancel => {
+                    return Ok(None);
+                }
+                FuzzyInput::Text(t) if t == " " => {
+                    self.checked[cursor] = !self.checked[cursor];
+                }
+                FuzzyInput::Text(t) if t.eq_ignore_ascii_case("a") => {
+                    let target = toggle_all_target(&self.checked);
+                    self.checked.iter_mut().for_each(|c| *c = target);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// `a`: check everything unless already all checked, then uncheck all.
+fn toggle_all_target(checked: &[bool]) -> bool {
+    checked.iter().any(|&c| !c)
+}
+
+/// Restores the cursor on scope exit — early `?` returns must not leave it
+/// hidden.
+struct CursorGuard(Term);
+
+impl CursorGuard {
+    fn hide(term: &Term) -> std::io::Result<Self> {
+        term.hide_cursor()?;
+        Ok(Self(term.clone()))
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let _ = self.0.show_cursor();
     }
 }
 
@@ -497,8 +691,17 @@ pub(crate) fn matches_fuzzy(query: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        matches_fuzzy, normalize_pasted_query, query_for_filter, score_match, truncate_to_width,
+        matches_fuzzy, normalize_pasted_query, query_for_filter, score_match, toggle_all_target,
+        truncate_to_width,
     };
+
+    #[test]
+    fn toggle_all_checks_everything_until_all_checked() {
+        assert!(toggle_all_target(&[false, false]));
+        assert!(toggle_all_target(&[true, false]));
+        assert!(!toggle_all_target(&[true, true]));
+        assert!(!toggle_all_target(&[]));
+    }
 
     #[test]
     fn truncate_to_width_counts_wide_chars_as_two_columns() {

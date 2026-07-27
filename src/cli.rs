@@ -551,7 +551,7 @@ pub struct KeysArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Comma-separated key ids for `keys export` (default: all keys)
+    /// Comma-separated key ids or names for `keys export` (default: all keys)
     #[arg(long, value_name = "IDS", value_delimiter = ',')]
     pub ids: Vec<String>,
 
@@ -566,11 +566,6 @@ pub struct KeysArgs {
     /// On `keys import` conflict, insert the imported key under a fresh id
     #[arg(long)]
     pub rename: bool,
-
-    /// On `keys export`, include the device-bound aivo-starter key
-    /// (filtered out by default; not portable between machines)
-    #[arg(long = "include-starter")]
-    pub include_starter: bool,
 
     /// On `keys export`, include OAuth/login sessions (Claude, Codex,
     /// Gemini, Copilot, Cursor login). Off by default — subscription-bound

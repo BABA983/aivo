@@ -31,6 +31,8 @@ pub struct ImportReport {
     pub overwritten: Vec<String>,
     pub renamed: Vec<(String, String)>,
     pub skipped: Vec<String>,
+    /// Starter rows dropped from the incoming records (device-bound).
+    pub skipped_starter: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +141,37 @@ pub(crate) fn generate_key_id(existing_ids: &HashSet<String>) -> Result<String> 
     );
 }
 
+/// Exact id / short-id is a single match, else every exact-name match.
+/// The one source of the id-vs-name precedence rule.
+pub(crate) fn match_keys_by_id_or_name<'a>(
+    keys: &'a [ApiKey],
+    id_or_name: &str,
+) -> Vec<&'a ApiKey> {
+    if let Some(key) = keys
+        .iter()
+        .find(|k| k.id == id_or_name || k.short_id() == id_or_name)
+    {
+        return vec![key];
+    }
+    keys.iter().filter(|k| k.name == id_or_name).collect()
+}
+
+/// Account-bound login sessions: OAuth sentinels, Copilot, Cursor browser
+/// login. Cursor needs a decrypt probe — a plain Cursor API key shares the
+/// base sentinel.
+pub(crate) fn is_login_session_record(key: &ApiKey) -> bool {
+    use crate::services::provider_profile::is_oauth_or_copilot_base;
+    if is_oauth_or_copilot_base(&key.base_url) {
+        return true;
+    }
+    if crate::services::cursor_acp::is_cursor_acp_base(&key.base_url) {
+        let mut probe = key.clone();
+        return ApiKeyStore::decrypt_key_secret(&mut probe).is_ok()
+            && crate::services::cursor_acp::cursor_account_id(&probe).is_some();
+    }
+    false
+}
+
 impl ApiKeyStore {
     pub(crate) async fn add_key_with_protocol(
         &self,
@@ -175,37 +208,48 @@ impl ApiKeyStore {
         Ok(id)
     }
 
-    /// Two categories are filtered unless explicitly opted in:
-    /// - `aivo-starter` (device-bound; `include_starter`)
-    /// - OAuth / login sessions (account-bound subscription credentials —
-    ///   Claude, Codex, Gemini, Copilot, Cursor login; `include_oauth`)
-    ///
-    /// Plain API keys always export. The filter exists so a casual export
-    /// doesn't silently ship subscription access alongside provider keys.
+    /// The starter key never exports — the real credential is the
+    /// per-install device key (`secrets/device-key`), so the record is dead
+    /// weight elsewhere. Login sessions are filtered unless `include_oauth`.
+    /// `ids` match by full id, short id, or exact name; ambiguous names
+    /// error.
     pub(crate) async fn export_keys(
         &self,
         ids: Option<&[String]>,
-        include_starter: bool,
         include_oauth: bool,
     ) -> Result<(Vec<ApiKey>, ExportFilterReport)> {
-        use crate::services::provider_profile::{is_aivo_starter_base, is_oauth_or_copilot_base};
+        use crate::services::provider_profile::is_aivo_starter_base;
 
         let keys = self.get_keys().await?;
 
         let mut selected: Vec<ApiKey> = if let Some(filter) = ids {
             let mut missing = Vec::new();
-            let mut found = Vec::new();
+            let mut found: Vec<ApiKey> = Vec::new();
             for needle in filter {
-                match keys
-                    .iter()
-                    .find(|k| &k.id == needle || k.short_id() == needle.as_str())
-                {
-                    Some(k) => found.push(k.clone()),
+                let matches = match_keys_by_id_or_name(&keys, needle);
+                if matches.len() > 1 {
+                    return Err(anyhow::anyhow!(
+                        "Key name \"{}\" is ambiguous — matches ids {}. Use an id instead.",
+                        needle,
+                        matches
+                            .iter()
+                            .map(|k| k.short_id())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                match matches.first() {
+                    // The same key named twice (e.g. by id and by name) exports once.
+                    Some(k) if !found.iter().any(|f| f.id == k.id) => found.push((*k).clone()),
+                    Some(_) => {}
                     None => missing.push(needle.clone()),
                 }
             }
             if !missing.is_empty() {
-                return Err(anyhow::anyhow!("Unknown key id(s): {}", missing.join(", ")));
+                return Err(anyhow::anyhow!(
+                    "Unknown key id or name: {}. Run `aivo keys list` to see keys.",
+                    missing.join(", ")
+                ));
             }
             found
         } else {
@@ -213,24 +257,12 @@ impl ApiKeyStore {
         };
 
         let mut report = ExportFilterReport::default();
-        if !include_starter {
-            let before = selected.len();
-            selected.retain(|k| !is_aivo_starter_base(&k.base_url));
-            report.skipped_starter = before - selected.len();
-        }
+        let before = selected.len();
+        selected.retain(|k| !is_aivo_starter_base(&k.base_url));
+        report.skipped_starter = before - selected.len();
         if !include_oauth {
             let before = selected.len();
-            let mut retained = Vec::with_capacity(selected.len());
-            for mut key in selected {
-                let is_cursor_login =
-                    crate::services::cursor_acp::is_cursor_acp_base(&key.base_url)
-                        && Self::decrypt_key_secret(&mut key).is_ok()
-                        && crate::services::cursor_acp::cursor_account_id(&key).is_some();
-                if !is_oauth_or_copilot_base(&key.base_url) && !is_cursor_login {
-                    retained.push(key);
-                }
-            }
-            selected = retained;
+            selected.retain(|key| !is_login_session_record(key));
             report.skipped_oauth = before - selected.len();
         }
 
@@ -249,6 +281,8 @@ impl ApiKeyStore {
         records: Vec<ApiKey>,
         policy: ImportPolicy,
     ) -> Result<ImportReport> {
+        use crate::services::provider_profile::is_aivo_starter_base;
+
         let _lock = self.ctx.acquire_config_lock()?;
         let mut config = self.ctx.load().await?;
         refuse_masked_lockout(&config.api_keys)?;
@@ -259,6 +293,12 @@ impl ApiKeyStore {
         let mut report = ImportReport::default();
 
         for mut incoming in records {
+            // Starter rows are dead off their origin machine; old export
+            // files may still contain them.
+            if is_aivo_starter_base(&incoming.base_url) {
+                report.skipped_starter += 1;
+                continue;
+            }
             let source_id = incoming.id.clone();
             let conflict_idx = config
                 .api_keys
@@ -656,16 +696,10 @@ impl ApiKeyStore {
         id_or_name: &str,
     ) -> Result<Vec<ApiKey>> {
         let keys = self.get_keys().await?;
-
-        if let Some(key) = keys
-            .iter()
-            .find(|k| k.id == id_or_name || k.short_id() == id_or_name)
+        Ok(match_keys_by_id_or_name(&keys, id_or_name)
+            .into_iter()
             .cloned()
-        {
-            return Ok(vec![key]);
-        }
-
-        Ok(keys.into_iter().filter(|k| k.name == id_or_name).collect())
+            .collect())
     }
 
     pub(crate) async fn get_active_key(&self) -> Result<Option<ApiKey>> {
@@ -991,7 +1025,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (exported, _) = store.export_keys(None, true, true).await.unwrap();
+        let (exported, _) = store.export_keys(None, true).await.unwrap();
         assert_eq!(exported.len(), 2);
         for key in &exported {
             assert!(!is_encrypted(&key.key), "exported secret must be plaintext");
@@ -1002,7 +1036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_skips_aivo_starter_by_default() {
+    async fn export_always_skips_aivo_starter() {
         let temp_dir = TempDir::new().unwrap();
         let store = make_store(&temp_dir);
 
@@ -1015,13 +1049,53 @@ mod tests {
             .await
             .unwrap();
 
-        let (without, report) = store.export_keys(None, false, true).await.unwrap();
-        assert_eq!(without.len(), 1);
-        assert_eq!(without[0].name, "alpha");
+        let (exported, report) = store.export_keys(None, true).await.unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].name, "alpha");
         assert_eq!(report.skipped_starter, 1);
 
-        let (with, _) = store.export_keys(None, true, true).await.unwrap();
-        assert_eq!(with.len(), 2);
+        // Even an explicit --ids selection drops the starter row.
+        let (by_id, report) = store
+            .export_keys(Some(&["aivo".to_string(), "alpha".to_string()]), true)
+            .await
+            .unwrap();
+        assert_eq!(by_id.len(), 1);
+        assert_eq!(by_id[0].name, "alpha");
+        assert_eq!(report.skipped_starter, 1);
+    }
+
+    #[tokio::test]
+    async fn import_drops_starter_rows() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = make_store(&temp_dir);
+
+        let records = vec![
+            ApiKey::new_with_protocol(
+                "aa1".into(),
+                "aivo".into(),
+                "aivo-starter".into(),
+                None,
+                "starter-token".into(),
+            ),
+            ApiKey::new_with_protocol(
+                "bb2".into(),
+                "alpha".into(),
+                "http://a".into(),
+                None,
+                "sk-alpha".into(),
+            ),
+        ];
+
+        let report = store
+            .import_keys(records, ImportPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(report.skipped_starter, 1);
+        assert_eq!(report.imported.len(), 1);
+
+        let keys = store.get_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "alpha");
     }
 
     #[tokio::test]
@@ -1064,12 +1138,12 @@ mod tests {
             .await
             .unwrap();
 
-        let (without, report) = store.export_keys(None, true, false).await.unwrap();
+        let (without, report) = store.export_keys(None, false).await.unwrap();
         assert_eq!(without.len(), 1);
         assert_eq!(without[0].name, "alpha");
         assert_eq!(report.skipped_oauth, 5);
 
-        let (with, _) = store.export_keys(None, true, true).await.unwrap();
+        let (with, _) = store.export_keys(None, true).await.unwrap();
         assert_eq!(with.len(), 6);
     }
 
@@ -1085,7 +1159,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (without, report) = store.export_keys(None, true, false).await.unwrap();
+        let (without, report) = store.export_keys(None, false).await.unwrap();
         assert_eq!(without.len(), 1);
         assert_eq!(without[0].name, "cursor");
         assert_eq!(without[0].key.as_str(), "sk-cursor");
@@ -1107,17 +1181,67 @@ mod tests {
             .unwrap();
 
         let (only_a, _) = store
-            .export_keys(Some(std::slice::from_ref(&id_a)), true, true)
+            .export_keys(Some(std::slice::from_ref(&id_a)), true)
             .await
             .unwrap();
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].name, "alpha");
 
         let err = store
-            .export_keys(Some(&["does-not-exist".to_string()]), true, true)
+            .export_keys(Some(&["does-not-exist".to_string()]), true)
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("Unknown key id"));
+        assert!(err.to_string().contains("Unknown key id or name"));
+    }
+
+    #[tokio::test]
+    async fn export_filters_by_name_and_dedupes() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = make_store(&temp_dir);
+
+        let id_a = store
+            .add_key_with_protocol("alpha", "http://a", None, "sk-alpha")
+            .await
+            .unwrap();
+        store
+            .add_key_with_protocol("beta", "http://b", None, "sk-beta")
+            .await
+            .unwrap();
+
+        let (by_name, _) = store
+            .export_keys(Some(&["alpha".to_string()]), true)
+            .await
+            .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].name, "alpha");
+
+        // Same key selected by name and id exports once.
+        let (deduped, _) = store
+            .export_keys(Some(&["alpha".to_string(), id_a.clone()]), true)
+            .await
+            .unwrap();
+        assert_eq!(deduped.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn export_rejects_ambiguous_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = make_store(&temp_dir);
+
+        store
+            .add_key_with_protocol("dup", "http://a", None, "sk-a")
+            .await
+            .unwrap();
+        store
+            .add_key_with_protocol("dup", "http://b", None, "sk-b")
+            .await
+            .unwrap();
+
+        let err = store
+            .export_keys(Some(&["dup".to_string()]), true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"));
     }
 
     #[tokio::test]
@@ -1127,7 +1251,7 @@ mod tests {
         src.add_key_with_protocol("alpha", "http://a", None, "sk-alpha")
             .await
             .unwrap();
-        let (exported, _) = src.export_keys(None, true, true).await.unwrap();
+        let (exported, _) = src.export_keys(None, true).await.unwrap();
 
         let dst_dir = TempDir::new().unwrap();
         let dst = make_store(&dst_dir);
@@ -1215,7 +1339,7 @@ mod tests {
             .add_key_with_protocol("alpha", "http://a", None, "sk-alpha")
             .await
             .unwrap();
-        let (exported, _) = store.export_keys(None, true, true).await.unwrap();
+        let (exported, _) = store.export_keys(None, true).await.unwrap();
 
         let report = store
             .import_keys(exported, ImportPolicy::Skip)
@@ -1234,7 +1358,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut imported, _) = store.export_keys(None, true, true).await.unwrap();
+        let (mut imported, _) = store.export_keys(None, true).await.unwrap();
         imported[0].key = Zeroizing::new("sk-rotated".to_string());
 
         let report = store
@@ -1256,7 +1380,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut imported, _) = store.export_keys(None, true, true).await.unwrap();
+        let (mut imported, _) = store.export_keys(None, true).await.unwrap();
         imported[0].key = Zeroizing::new("sk-incoming".to_string());
 
         let report = store

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::cli::KeysArgs;
 use crate::commands::keys_ui;
 use crate::commands::{starter_provider_label, truncate_url_for_display};
-use crate::tui::{FuzzyOutcome, FuzzySelect};
+use crate::tui::{FuzzyOutcome, FuzzySelect, MultiSelect};
 
 use crate::errors::ExitCode;
 use crate::services::account_store;
@@ -58,9 +58,9 @@ fn term_read_line(prompt: &str) -> std::io::Result<String> {
 // stdin isn't a TTY (piped input, CI) — there `initial` is ignored and empty input
 // lets the caller keep its default.
 fn term_edit_line(prompt: &str, initial: &str) -> std::io::Result<String> {
-    use std::io::{IsTerminal, Write};
+    use std::io::Write;
 
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+    if !crate::tui::prompt_interactive() {
         use std::io::BufRead;
         print!("{}", prompt);
         std::io::stdout().flush()?;
@@ -314,6 +314,9 @@ fn confirm(prompt: &str) -> std::io::Result<bool> {
     Ok(matches!(input.to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
+/// Per-loop cap; empty and mismatch retries compose to at most 3×3 prompts.
+const PASSWORD_ATTEMPTS: usize = 3;
+
 fn read_password_once(from_stdin: bool, label: &str) -> Result<Zeroizing<String>> {
     if from_stdin {
         use std::io::BufRead;
@@ -329,40 +332,147 @@ fn read_password_once(from_stdin: bool, label: &str) -> Result<Zeroizing<String>
         }
         Ok(Zeroizing::new(line))
     } else {
-        let pw = term_read_secret(&format!("{}: ", label))?;
-        if pw.is_empty() {
-            return Err(anyhow::anyhow!("Password must not be empty"));
+        // Re-prompt on empty; bounded so an EOF-fed pty can't spin forever.
+        for attempt in 0..PASSWORD_ATTEMPTS {
+            let pw = term_read_secret(&format!("{}: ", label))?;
+            if pw.is_empty() {
+                if attempt + 1 < PASSWORD_ATTEMPTS {
+                    println!(
+                        "{}",
+                        style::dim("Password must not be empty — try again (Ctrl+C cancels).")
+                    );
+                }
+                continue;
+            }
+            return Ok(Zeroizing::new(pw));
         }
-        Ok(Zeroizing::new(pw))
+        Err(anyhow::anyhow!("Password must not be empty"))
     }
 }
 
 fn read_password_twice(from_stdin: bool, label: &str) -> Result<Zeroizing<String>> {
-    let pw = read_password_once(from_stdin, label)?;
     if from_stdin {
-        return Ok(pw);
+        return read_password_once(true, label);
     }
-    let confirm = Zeroizing::new(term_read_secret("Confirm password: ")?);
-    if pw.as_str() != confirm.as_str() {
-        return Err(anyhow::anyhow!("Passwords did not match"));
+    for attempt in 0..PASSWORD_ATTEMPTS {
+        let pw = read_password_once(false, label)?;
+        let confirmation = Zeroizing::new(term_read_secret("Confirm password: ")?);
+        if pw.as_str() == confirmation.as_str() {
+            return Ok(pw);
+        }
+        if attempt + 1 < PASSWORD_ATTEMPTS {
+            println!("{}", style::dim("Passwords didn't match — try again."));
+        }
     }
-    Ok(pw)
+    Err(anyhow::anyhow!("Passwords did not match"))
 }
 
-fn write_export_file(path: &std::path::Path, data: &[u8], force: bool) -> Result<()> {
+// Ctrl+C at a prompt surfaces as io::ErrorKind::Interrupted.
+fn prompt_interrupted(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == std::io::ErrorKind::Interrupted)
+}
+
+/// Outcome of the guided key-selection step of `keys export`.
+enum ExportPick {
+    Keys(Vec<String>),
+    /// Flow ends here; the message has already been printed.
+    Stop(ExitCode),
+}
+
+fn print_no_keys_to_export(skipped_oauth: usize, skipped_starter: usize) {
+    let hint = if skipped_oauth > 0 {
+        " (pass --include-oauth to include login sessions)"
+    } else {
+        ""
+    };
+    eprintln!(
+        "{} No keys to export.{}",
+        style::red("Error:"),
+        style::dim(hint)
+    );
+    if skipped_starter > 0 {
+        eprintln!(
+            "{}",
+            style::dim("The aivo-starter key never exports — it only works on this machine.")
+        );
+    }
+}
+
+// Comma-joins names into width-bounded lines; never splits a name.
+fn wrap_names(names: &[&str], width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthStr;
+    let width = width.max(20);
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for (i, name) in names.iter().enumerate() {
+        let piece = if i + 1 < names.len() {
+            format!("{name},")
+        } else {
+            (*name).to_string()
+        };
+        let piece_w = UnicodeWidthStr::width(piece.as_str());
+        if current.is_empty() {
+            current = piece;
+            current_w = piece_w;
+        } else if current_w + 1 + piece_w <= width {
+            current.push(' ');
+            current.push_str(&piece);
+            current_w += 1 + piece_w;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current = piece;
+            current_w = piece_w;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn default_export_filename() -> String {
+    format!("aivo-keys-{}.aivo", chrono::Local::now().format("%Y-%m-%d"))
+}
+
+fn refuse_overwrite(path: &std::path::Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Refusing to overwrite existing file at {}. Pass --force to override.",
+        path.display()
+    )
+}
+
+/// Directory always errors, symlink errors unless `force`; returns whether
+/// a regular file exists — the overwrite decision is the caller's.
+fn vet_export_target(path: &std::path::Path, force: bool) -> Result<bool> {
     // `symlink_metadata` doesn't follow symlinks; `exists()` would silently
     // accept a dangling symlink and write through it.
-    if !force && let Ok(meta) = std::fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(false);
+    };
+    let ft = meta.file_type();
+    if ft.is_dir() {
+        return Err(anyhow::anyhow!(
+            "{} is a directory — pass a file path.",
+            path.display()
+        ));
+    }
+    if ft.is_symlink() {
+        if !force {
             return Err(anyhow::anyhow!(
                 "Refusing to write through symlink at {}. Pass --force to override.",
                 path.display()
             ));
         }
-        return Err(anyhow::anyhow!(
-            "Refusing to overwrite existing file at {}. Pass --force to override.",
-            path.display()
-        ));
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn write_export_file(path: &std::path::Path, data: &[u8], force: bool) -> Result<()> {
+    if vet_export_target(path, force)? && !force {
+        return Err(refuse_overwrite(path));
     }
 
     if let Some(parent) = path.parent()
@@ -1076,6 +1186,11 @@ impl KeysCommand {
     pub async fn execute(&self, keys_args: KeysArgs) -> ExitCode {
         match self.execute_internal(&keys_args).await {
             Ok(code) => code,
+            // Ctrl+C at any prompt reads as a cancel, not a failure.
+            Err(e) if prompt_interrupted(&e) => {
+                println!("{}", style::dim("Cancelled."));
+                ExitCode::Success
+            }
             Err(e) => {
                 eprintln!("{} {}", style::red("Error:"), e);
                 crate::errors::exit_code_for_error(&e)
@@ -1423,62 +1538,139 @@ impl KeysCommand {
         Ok(ExitCode::Success)
     }
 
+    /// Starter rows never appear (device-bound); login sessions start
+    /// unchecked — ticking one is the consent `--include-oauth` would give.
+    async fn prompt_pick_export_keys(&self, preselect_oauth: bool) -> Result<ExportPick> {
+        use crate::services::provider_profile::is_aivo_starter_base;
+
+        // Metadata-only load — the picker never needs decrypted secrets.
+        let (keys, _) = self.session_store.get_keys_and_active_id_info().await?;
+        if keys.is_empty() {
+            println!("{}", style::dim("No API keys found."));
+            println!("  {}", crate::commands::add_key_cta());
+            return Ok(ExportPick::Stop(ExitCode::UserError));
+        }
+        let total = keys.len();
+        let mut choices: Vec<ApiKey> = Vec::new();
+        let mut items: Vec<String> = Vec::new();
+        let mut notes: Vec<Option<String>> = Vec::new();
+        let mut checked: Vec<bool> = Vec::new();
+        for key in keys {
+            if is_aivo_starter_base(&key.base_url) {
+                continue;
+            }
+            let login = crate::services::api_key_store::is_login_session_record(&key);
+            items.push(format_key_choice(&key));
+            notes.push(login.then(|| "login session".to_string()));
+            checked.push(!login || preselect_oauth);
+            choices.push(key);
+        }
+        if choices.is_empty() {
+            // Only starter keys existed.
+            print_no_keys_to_export(0, total);
+            return Ok(ExportPick::Stop(ExitCode::UserError));
+        }
+
+        match MultiSelect::new()
+            .with_prompt("Select keys to export")
+            .items(&items)
+            .notes(notes)
+            .checked(&checked)
+            .interact_opt()?
+        {
+            None => {
+                println!("{}", style::dim("Cancelled."));
+                Ok(ExportPick::Stop(ExitCode::Success))
+            }
+            Some(picked) if picked.is_empty() => {
+                println!("{}", style::dim("Nothing selected."));
+                Ok(ExportPick::Stop(ExitCode::Success))
+            }
+            Some(picked) => {
+                // The picker erases itself — leave a one-line record.
+                let echo = if picked.len() <= 3 {
+                    picked
+                        .iter()
+                        .map(|&i| choices[i].display_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    format!("{} of {} selected", picked.len(), choices.len())
+                };
+                println!("{} {}", style::dim("Keys:"), style::cyan(echo));
+                Ok(ExportPick::Keys(
+                    picked.iter().map(|&i| choices[i].id.clone()).collect(),
+                ))
+            }
+        }
+    }
+
     async fn export_keys_action(
         &self,
         file_arg: Option<&str>,
         keys_args: &KeysArgs,
     ) -> Result<ExitCode> {
-        let file = match file_arg {
-            Some(p) if !p.is_empty() => crate::services::system_env::expand_tilde(p),
-            _ => {
-                Self::print_help(Some("export"));
-                return Ok(ExitCode::Success);
+        // `--password-stdin` reserves stdin for the password, so no prompting then.
+        let interactive = !keys_args.password_stdin && crate::tui::prompt_interactive();
+
+        // Step chips number only the prompts this invocation will show.
+        let picker_step =
+            keys_args.ids.is_empty() && interactive && crate::tui::picker_interactive();
+        let dest_step = interactive && file_arg.is_none_or(str::is_empty);
+        let total_steps = usize::from(picker_step) + usize::from(dest_step) + 1;
+
+        let picked_ids: Option<Vec<String>> = if picker_step {
+            keys_ui::step_header(
+                1,
+                total_steps,
+                "Select keys",
+                "space toggles, enter confirms",
+            );
+            match self
+                .prompt_pick_export_keys(keys_args.include_oauth)
+                .await?
+            {
+                ExportPick::Keys(ids) => Some(ids),
+                ExportPick::Stop(code) => return Ok(code),
             }
-        };
-
-        let id_filter: Option<&[String]> = if keys_args.ids.is_empty() {
-            None
         } else {
-            Some(&keys_args.ids)
+            None
         };
 
+        let id_filter: Option<&[String]> = picked_ids
+            .as_deref()
+            .or((!keys_args.ids.is_empty()).then_some(keys_args.ids.as_slice()));
+        // Ticking a login row is consent; `--ids` deliberately still
+        // requires --include-oauth so scripts never ship logins by accident.
+        let include_oauth = keys_args.include_oauth || picked_ids.is_some();
+
+        // Fail on an empty selection or bad --ids before any prompt.
         let (records, filter_report) = self
             .session_store
-            .export_keys(
-                id_filter,
-                keys_args.include_starter,
-                keys_args.include_oauth,
-            )
+            .export_keys(id_filter, include_oauth)
             .await?;
         if records.is_empty() {
-            let mut hints: Vec<String> = Vec::new();
-            if filter_report.skipped_starter > 0 {
-                hints.push("--include-starter".into());
-            }
-            if filter_report.skipped_oauth > 0 {
-                hints.push("--include-oauth".into());
-            }
-            let hint = if hints.is_empty() {
-                String::new()
-            } else {
-                format!(" (pass {} to include filtered keys)", hints.join(" / "))
-            };
-            eprintln!(
-                "{} No keys to export.{}",
-                style::red("Error:"),
-                style::dim(hint)
-            );
+            print_no_keys_to_export(filter_report.skipped_oauth, filter_report.skipped_starter);
             return Ok(ExitCode::UserError);
         }
-
         let n = records.len();
-        println!("{} {} key{}:", style::dim("Exporting"), n, plural(n));
-        for k in &records {
-            println!(
-                "  {} {}",
-                style::cyan(k.short_id()),
-                style::dim(k.display_name())
-            );
+
+        // Review point before the password prompt; the picker path already
+        // echoed, and scripts have no decision left.
+        if picked_ids.is_none() && interactive {
+            use unicode_width::UnicodeWidthStr;
+            let names: Vec<&str> = records.iter().map(|k| k.display_name()).collect();
+            let width = console::Term::stdout().size().1 as usize;
+            let head = format!("{} {} key{}:", style::dim("Exporting"), n, plural(n));
+            let joined = names.join(", ");
+            if console::measure_text_width(&head) + 1 + joined.width() <= width {
+                println!("{} {}", head, style::dim(joined));
+            } else {
+                println!("{head}");
+                for line in wrap_names(&names, width.saturating_sub(2)) {
+                    println!("  {}", style::dim(line));
+                }
+            }
         }
         if filter_report.skipped_oauth > 0 {
             println!(
@@ -1490,6 +1682,50 @@ impl KeysCommand {
             );
         }
 
+        let file = match file_arg {
+            Some(p) if !p.is_empty() => crate::services::system_env::expand_tilde(p),
+            _ if interactive => {
+                // Destination always precedes the last step (password).
+                keys_ui::step_header(
+                    total_steps - 1,
+                    total_steps,
+                    "Destination",
+                    "where to write the encrypted file",
+                );
+                let input = term_edit_line(&style::dim("Export to: "), &default_export_filename())?;
+                if input.is_empty() {
+                    println!("{}", style::dim("Cancelled."));
+                    return Ok(ExitCode::Success);
+                }
+                crate::services::system_env::expand_tilde(&input)
+            }
+            _ => {
+                Self::print_help(Some("export"));
+                return Ok(ExitCode::Success);
+            }
+        };
+
+        // Vet the target before the user types a password twice.
+        let mut force = keys_args.force;
+        if vet_export_target(&file, force)? && !force {
+            if !interactive {
+                return Err(refuse_overwrite(&file));
+            }
+            if !confirm(&format!("Overwrite {}?", file.display()))? {
+                println!("{}", style::dim("Cancelled."));
+                return Ok(ExitCode::Success);
+            }
+            force = true;
+        }
+
+        if interactive {
+            keys_ui::step_header(
+                total_steps,
+                total_steps,
+                "Password",
+                "protects the file; input is hidden",
+            );
+        }
         let password = read_password_twice(keys_args.password_stdin, "Encryption password")?;
 
         let payload =
@@ -1498,7 +1734,7 @@ impl KeysCommand {
         let json = serde_json::to_string_pretty(&envelope)
             .context("failed to serialise export envelope")?;
 
-        write_export_file(&file, json.as_bytes(), keys_args.force)?;
+        write_export_file(&file, json.as_bytes(), force)?;
 
         println!(
             "{} Exported {} key{} to {}",
@@ -1507,6 +1743,16 @@ impl KeysCommand {
             plural(n),
             style::cyan(file.display().to_string())
         );
+        // Keep scripted output tight — the onboarding hint is for humans.
+        if interactive {
+            println!(
+                "{}",
+                style::dim(format!(
+                    "Import on another machine: aivo keys import {}",
+                    file.display()
+                ))
+            );
+        }
         println!(
             "{}",
             style::dim(
@@ -1594,6 +1840,14 @@ impl KeysCommand {
                 plural(s),
                 style::cyan("--overwrite"),
                 style::cyan("--rename")
+            );
+        }
+        if report.skipped_starter > 0 {
+            println!(
+                "{dot} {}",
+                style::dim(
+                    "Skipped the export's aivo-starter key — it only works on its original machine."
+                )
             );
         }
         Ok(ExitCode::Success)
@@ -3392,7 +3646,7 @@ fn print_help_overview() {
         "reset-route [id|name]",
         "Reset cached provider routing for a key",
     );
-    keys_help_row("export <file>", "Write keys to a password-encrypted file");
+    keys_help_row("export [file]", "Write keys to a password-encrypted file");
     keys_help_row("import <file>", "Merge keys from a password-encrypted file");
     println!();
     println!(
@@ -3556,30 +3810,24 @@ fn print_help_reset_route() {
 }
 
 fn print_help_export() {
-    println!("{} aivo keys export <FILE>", style::bold("Usage:"));
+    println!("{} aivo keys export [FILE]", style::bold("Usage:"));
     println!();
     println!(
         "{}",
-        style::dim(
-            "Write all keys (or `--ids`) to a password-encrypted file portable to other machines."
-        )
+        style::dim("Export keys to a password-encrypted file. Run bare for a guided flow.")
     );
     println!();
     println!("{}", style::bold("Flags:"));
-    keys_help_row("--ids <a,b,c>", "Export only the given key ids");
+    keys_help_row("--ids <a,b,c>", "Export only the given keys (ids or names)");
     keys_help_row("--password-stdin", "Read password from stdin (no prompt)");
     keys_help_row(
-        "--include-starter",
-        "Include the device-bound aivo-starter key (off by default)",
-    );
-    keys_help_row(
         "--include-oauth",
-        "Include OAuth/Copilot/Cursor login sessions (off by default)",
+        "Include OAuth/Copilot/Cursor login sessions",
     );
-    keys_help_row("--force", "Overwrite an existing file at the target path");
+    keys_help_row("--force", "Overwrite an existing file");
     println!();
     println!("{}", style::bold("Examples:"));
-    println!("  {}", style::dim("aivo keys export ~/aivo-backup.aivo"));
+    println!("  {}", style::dim("aivo keys export"));
     println!(
         "  {}",
         style::dim("aivo keys export keys.aivo --ids abc,def")
@@ -3739,6 +3987,36 @@ mod tests {
     use crate::cli::KeysArgs;
 
     #[test]
+    fn wrap_names_breaks_between_names_within_width() {
+        let names = ["alpha", "beta", "gamma", "delta"];
+        let lines = wrap_names(&names, 20);
+        assert_eq!(lines, vec!["alpha, beta, gamma,", "delta"]);
+        assert!(lines.iter().all(|l| l.len() <= 20));
+    }
+
+    #[test]
+    fn wrap_names_single_line_when_it_fits() {
+        let lines = wrap_names(&["a", "b"], 80);
+        assert_eq!(lines, vec!["a, b"]);
+    }
+
+    #[test]
+    fn wrap_names_overlong_name_gets_own_line() {
+        let long = "x".repeat(40);
+        let lines = wrap_names(&["short", &long, "tail"], 20);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], format!("{long},"));
+    }
+
+    #[test]
+    fn wrap_names_counts_wide_chars_as_two_columns() {
+        // 6 CJK chars = 12 columns per name; two plus separators exceed 20,
+        // so they split.
+        let lines = wrap_names(&["智谱清言模型", "月之暗面模型"], 20);
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
     fn is_http_url_accepts_http_and_https() {
         assert!(is_http_url("http://example.com/x"));
         assert!(is_http_url("https://example.com/x"));
@@ -3769,7 +4047,6 @@ mod tests {
             password_stdin: false,
             overwrite: false,
             rename: false,
-            include_starter: false,
             include_oauth: false,
             force: false,
         }
@@ -3987,7 +4264,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
@@ -4027,7 +4303,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
@@ -4079,7 +4354,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
@@ -4109,7 +4383,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
@@ -4132,7 +4405,6 @@ mod tests {
             password_stdin: false,
             overwrite: false,
             rename: false,
-            include_starter: false,
             include_oauth: false,
             force: false,
         }
@@ -4200,7 +4472,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
@@ -4230,7 +4501,6 @@ mod tests {
                 password_stdin: false,
                 overwrite: false,
                 rename: false,
-                include_starter: false,
                 include_oauth: false,
                 force: false,
             })
