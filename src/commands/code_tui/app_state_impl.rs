@@ -5,10 +5,6 @@ impl CodeTuiApp {
         let _ = save_persisted_draft_history(&self.draft_history_all);
     }
 
-    pub(super) fn is_busy(&self) -> bool {
-        self.sending || self.loading_resume.is_some() || self.local_command.is_some()
-    }
-
     /// The session id worth advertising on exit so the user can `--resume`
     /// straight back into this conversation. `None` for an untouched chat —
     /// `flush_for_exit` only persists a non-empty history, so an empty one has

@@ -137,6 +137,7 @@ impl CodeTuiApp {
     }
 
     pub(super) fn insert_pasted_text(&mut self, text: &str) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         self.leave_history_navigation();
         for ch in text.chars() {
             self.insert_char_at_cursor(ch);

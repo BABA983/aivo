@@ -2236,7 +2236,7 @@ impl CodeTuiApp {
         }
     }
 
-    async fn handle_terminal_event(&mut self, event: Event) -> Result<Option<bool>> {
+    pub(super) async fn handle_terminal_event(&mut self, event: Event) -> Result<Option<bool>> {
         match event {
             // On Windows, crossterm emits both Press and Release events for
             // every keystroke; Unix only emits the press equivalent. Process
@@ -2248,7 +2248,10 @@ impl CodeTuiApp {
             Event::Mouse(mouse) => Ok(Some(self.handle_mouse(mouse).await?)),
             Event::Resize(_, _) => Ok(None),
             Event::Paste(text) => {
-                if !self.overlay_paste(&text) && !self.overlay.blocks_input() && !self.is_busy() {
+                if !self.overlay_paste(&text)
+                    && !self.overlay.blocks_input()
+                    && self.loading_resume.is_none()
+                {
                     self.insert_pasted_text(&text);
                 }
                 Ok(None)

@@ -168,6 +168,57 @@ fn test_insert_pasted_text_updates_draft_and_cursor() {
 }
 
 #[test]
+fn test_insert_pasted_text_normalizes_cr_to_newline() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+
+    app.insert_pasted_text("one\rtwo\r\nthree\nfour");
+
+    assert_eq!(app.draft, "one\ntwo\nthree\nfour");
+    assert_eq!(app.cursor, app.draft.len());
+}
+
+#[tokio::test]
+async fn paste_composes_while_sending() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+
+    app.handle_terminal_event(Event::Paste("queued prompt".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(app.draft, "queued prompt");
+}
+
+#[tokio::test]
+async fn paste_blocked_while_resume_loading() {
+    // The one state that blocks typing blocks paste too (see handle_key).
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.loading_resume = Some(LoadingResume {
+        request_id: 1,
+        preview: SessionPreview {
+            key_id: "k".into(),
+            key_name: "k".into(),
+            base_url: "u".into(),
+            session_id: "s".into(),
+            raw_model: "m".into(),
+            updated_at: "t".into(),
+            title: "t".into(),
+            preview_text: "p".into(),
+            origin: None,
+        },
+    });
+
+    app.handle_terminal_event(Event::Paste("late".into()))
+        .await
+        .unwrap();
+
+    assert_eq!(app.draft, "");
+}
+
+#[test]
 fn test_cursor_movement_basic() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
