@@ -1708,6 +1708,11 @@ fn attachment_storage_label(storage: &AttachmentStorage) -> &'static str {
     }
 }
 
+fn direct_base_url(key: &ApiKey) -> String {
+    let resolved = resolve_starter_base_url(&key.base_url);
+    normalize_base_url(&resolved).to_string()
+}
+
 /// Conditionally adds auth headers to a request. Skips when the key is empty
 /// (e.g. the free aivo starter provider needs no authentication).
 fn with_auth(builder: reqwest::RequestBuilder, key: &ApiKey) -> reqwest::RequestBuilder {
@@ -1787,7 +1792,7 @@ async fn send_chat_request<F>(
 where
     F: FnMut(ChatResponseChunk) -> Result<()>,
 {
-    let base = normalize_base_url(&key.base_url);
+    let base = direct_base_url(key);
     let url = format!("{}/v1/chat/completions", base);
 
     if non_streaming {
@@ -2441,7 +2446,7 @@ async fn send_responses_request<F>(
 where
     F: FnMut(ChatResponseChunk) -> Result<()>,
 {
-    let base = normalize_base_url(&key.base_url);
+    let base = direct_base_url(key);
     let url = format!("{}/v1/responses", base);
 
     if non_streaming {
@@ -2581,7 +2586,7 @@ async fn send_anthropic_request<F>(
 where
     F: FnMut(ChatResponseChunk) -> Result<()>,
 {
-    let base = normalize_base_url(&key.base_url);
+    let base = direct_base_url(key);
     let url = format!("{}/v1/messages", base);
 
     if non_streaming {
@@ -3360,6 +3365,23 @@ data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"tex
         );
         key.protocol_routes.insert("code".to_string(), tool);
         key
+    }
+
+    #[test]
+    fn direct_base_url_resolves_the_starter_sentinel() {
+        let mut key = ApiKey::new_with_protocol(
+            "id".to_string(),
+            crate::constants::AIVO_STARTER_KEY_NAME.to_string(),
+            crate::constants::AIVO_STARTER_SENTINEL.to_string(),
+            None,
+            crate::constants::AIVO_STARTER_EMPTY_SECRET.to_string(),
+        );
+        assert_eq!(
+            direct_base_url(&key),
+            crate::constants::AIVO_STARTER_REAL_URL
+        );
+        key.base_url = "https://api.example.com/v1/".to_string();
+        assert_eq!(direct_base_url(&key), "https://api.example.com");
     }
 
     #[test]
