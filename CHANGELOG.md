@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.43.0
+
+An images release. Attachments are clamped to 2000px and re-encoded to ~500KB before they're sent, and text-only models now get a described version instead of an error. `aivo code packs` and `aivo code agents` are removed. Also: a guided `keys export` flow, a `/config` modal built on live values, and pickers that open on the current choice.
+
+- feat(code): normalize image attachments — 2000px clamp + 500KB re-encode (17a4a287, #30)
+- feat(code): vision fallback — describe images for text-only models (51de3329)
+- feat(account): surface hosted image-description usage in `aivo account` (a4a31357)
+- remove: drop `aivo code packs` extension packs (4274b419)
+- remove: drop the `aivo code agents` CLI command (2da3224d)
+- improve(keys): guided export flow — select, destination, password (69b7e23f)
+- improve(code): /key always picks a model, pickers focus the current choice (f21c1b65)
+- improve(code): redesign the /config modal around live values (27be4110)
+- improve(code): drop the per-turn plain-vision-chat nag (f8f6581d)
+- fix(code): vision fallback survives resume, without the chatter (73ddf9ad)
+- fix(code): resolve the aivo-starter sentinel on the plain-chat path (35704d5b)
+- fix(code): pasted newlines arrive as CR — normalize, and keep mid-turn pastes (cae8c92d)
+- fix(pi): stop swapping starter-gateway claude/gemini ids for gpt-4o (a514b9ff)
+- fix(models): drop empty model IDs from provider catalogs (6f2daadb, #29)
+- fix(agent): invalidate packs cache by child listing, not root mtime (3bd11bc2)
+
 ## v0.42.2
 
 A coding-agent usability and performance patch. Zero-key states now offer clearer starter-key actions, picker cancellations behave consistently, and live sharing keeps its URL visible. The code TUI renders faster, reports live token counts for parallel sub-agent batches, improves marker and CJK thinking-row rendering, and keeps status token counts current between measurements. Model metadata and provider handling also get small correctness fixes, including more accurate Pi thinking-level advertisement and preventing an internal role from leaking to non-OpenAI upstreams.
