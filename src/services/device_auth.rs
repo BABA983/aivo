@@ -96,6 +96,9 @@ pub struct UsageLimits {
     /// Hosted web searches/day cap.
     #[serde(default)]
     pub spd: Option<u64>,
+    /// Hosted image descriptions/day cap (the vision fallback).
+    #[serde(default)]
+    pub dpd: Option<u64>,
 }
 
 /// One row of the per-model usage breakdown (current 24h window).
@@ -147,6 +150,13 @@ pub struct UsageSummary {
     pub searches: u64,
     #[serde(default)]
     pub searches_total: u64,
+    // Hosted image description
+    #[serde(default)]
+    pub describes: u64,
+    #[serde(default)]
+    pub describes_total: u64,
+    #[serde(default)]
+    pub describe_available: bool,
 }
 
 /// Body of `/api/device/usage`: a `linked` discriminator over a `UsageSummary`.
@@ -513,10 +523,11 @@ mod tests {
         let json = r#"{
             "linked":true,"plan":"aivo-pro","billing_mode":"subscription","is_pro":true,
             "subscription":{"status":"active","current_period_end":"2026-07-26T00:00:00Z"},
-            "limits":{"rpm":30,"rpd":1000,"tpd":100000,"cpd":5,"spd":10},
+            "limits":{"rpm":30,"rpd":1000,"tpd":100000,"cpd":5,"spd":10,"dpd":20},
             "rpd":120,"tpd":45000,"rpm":3,"cpd":0.42,
             "requests_total":8490,"tokens_total":2100000,"linked_devices":2,
             "searches":4,"searches_total":37,
+            "describes":6,"describes_total":9,"describe_available":true,
             "by_model":[{"model":"claude","tokens":1500000,"requests":4200}],
             "window_resets_at":"2026-06-27T14:32:00Z"
         }"#;
@@ -534,6 +545,10 @@ mod tests {
         assert_eq!(u.linked_devices, 2);
         assert_eq!(u.searches, 4);
         assert_eq!(u.searches_total, 37);
+        assert_eq!(u.limits.dpd, Some(20));
+        assert_eq!(u.describes, 6);
+        assert_eq!(u.describes_total, 9);
+        assert!(u.describe_available);
         assert_eq!(u.by_model.len(), 1);
         assert_eq!(u.by_model[0].model, "claude");
         assert_eq!(u.window_resets_at.as_deref(), Some("2026-06-27T14:32:00Z"));

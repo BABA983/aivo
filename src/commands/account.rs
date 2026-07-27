@@ -399,6 +399,12 @@ fn print_usage(s: &UsageSummary) {
             colorize_unit(&format_human(s.searches_total))
         ));
     }
+    if s.describes_total > 0 {
+        parts.push(format!(
+            "{} images",
+            colorize_unit(&format_human(s.describes_total))
+        ));
+    }
     if let Some(ts) = &s.window_resets_at {
         parts.push(format!("resets {}", humanize_reset(ts)));
     }
@@ -407,7 +413,7 @@ fn print_usage(s: &UsageSummary) {
 
     println!();
     // Cost sits after Tokens, matching the dashboard.
-    let rows = [
+    let mut rows = vec![
         meter_row(
             "Requests",
             format_human(s.rpd),
@@ -444,6 +450,18 @@ fn print_usage(s: &UsageSummary) {
             s.limits.rpm,
         ),
     ];
+    if s.describe_available || s.describes > 0 {
+        rows.insert(
+            4,
+            meter_row(
+                "Images",
+                format_human(s.describes),
+                cap_or_infinity(s.limits.dpd),
+                s.describes,
+                s.limits.dpd,
+            ),
+        );
+    }
     let name_w = rows
         .iter()
         .map(|r| r.name.len())
