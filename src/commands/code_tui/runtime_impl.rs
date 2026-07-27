@@ -474,10 +474,8 @@ impl CodeTuiApp {
         } else if route_agent {
             self.spawn_agent_turn(input, attachments, vision_shim).await;
         } else {
-            if self.agent_capable() && (!attachments.is_empty() || conversation_has_image) {
-                let msg = if attachments.is_empty() {
-                    "Image in context — plain vision chat (agent tools off until /new)"
-                } else if all_images {
+            if self.agent_capable() && !attachments.is_empty() {
+                let msg = if all_images {
                     "Image sent as plain chat — this model isn't confirmed vision-capable for the agent"
                 } else {
                     "Attachment sent as plain chat — agent tools are off for this message"

@@ -105,11 +105,8 @@ async fn known_vision_and_unknown_models_bypass_the_shim() {
         .await
         .unwrap();
     assert!(app.sending, "plain-chat turn went out");
-    assert!(
-        notice_text(&app).contains("plain"),
-        "unknown-vision notice unchanged: {}",
-        notice_text(&app)
-    );
+    // Attach-time already warned; the lingering-image re-route is silent.
+    assert_eq!(notice_text(&app), "", "text follow-up must not re-nag");
 }
 
 #[tokio::test]
