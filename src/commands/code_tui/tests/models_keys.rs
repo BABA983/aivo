@@ -345,10 +345,17 @@ async fn test_complete_key_switch_different_provider_keeps_chat() {
     assert_eq!(app.session_id, "old-session", "same session — no reset");
 }
 
+fn choice(id: &str) -> ModelChoice {
+    ModelChoice {
+        id: id.to_string(),
+        label: id.to_string(),
+    }
+}
+
 #[tokio::test]
 async fn test_cross_provider_switch_keeps_conversation() {
-    // Switching to a different-provider key applies directly and keeps the
-    // conversation — no reset, no confirm. It replays on the new provider.
+    // A saved model still routes through the picker; picking applies the
+    // switch and keeps the conversation.
     let temp_dir = TempDir::new().unwrap();
     let store = SessionStore::with_path(temp_dir.path().join("config.json"));
     let key_a = store
@@ -372,7 +379,30 @@ async fn test_cross_provider_switch_keeps_conversation() {
 
     app.begin_key_switch(key_b_full).await.unwrap();
 
-    assert_eq!(app.key.id, key_b_id, "switch applied directly, no confirm");
+    assert!(
+        matches!(
+            &app.overlay,
+            Overlay::Picker(p) if matches!(
+                p.kind,
+                PickerKind::Model {
+                    target: ModelSelectionTarget::KeySwitch { .. },
+                    ..
+                }
+            )
+        ),
+        "a saved model still goes through the picker"
+    );
+    assert_eq!(app.key.id, key_a, "switch waits for the model pick");
+
+    app.populate_model_picker(vec![choice("model-a"), choice("model-b")]);
+    let Overlay::Picker(picker) = &app.overlay else {
+        panic!("expected model picker");
+    };
+    assert_eq!(picker.selected, 1, "saved model is focused");
+
+    app.activate_picker_selection(1).await.unwrap();
+
+    assert_eq!(app.key.id, key_b_id, "switch applied on pick, no confirm");
     assert_eq!(
         app.history.len(),
         4,
@@ -383,7 +413,7 @@ async fn test_cross_provider_switch_keeps_conversation() {
 
 #[tokio::test]
 async fn test_begin_key_switch_same_provider_skips_confirm() {
-    // Same provider = credential swap: apply straight through, no card.
+    // Same provider = credential swap: the pick applies straight through, no card.
     let temp_dir = TempDir::new().unwrap();
     let store = SessionStore::with_path(temp_dir.path().join("config.json"));
     let key_a = store
@@ -406,10 +436,89 @@ async fn test_begin_key_switch_same_provider_skips_confirm() {
     seed_two_exchanges(&mut app);
 
     app.begin_key_switch(key_b_full).await.unwrap();
+    app.populate_model_picker(vec![choice("model-b")]);
+    app.activate_picker_selection(0).await.unwrap();
 
-    assert_eq!(app.key.id, key_b_id, "applied directly");
+    assert_eq!(app.key.id, key_b_id, "applied on pick");
     assert_eq!(app.session_id, "keep-me", "chat preserved");
     assert_eq!(app.history.len(), 4);
+}
+
+#[tokio::test]
+async fn test_key_switch_without_listing_falls_back_to_saved_model() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = SessionStore::with_path(temp_dir.path().join("config.json"));
+    let key_a = store
+        .add_key_with_protocol("a", "https://a.example.com", None, "sk-a")
+        .await
+        .unwrap();
+    let key_b_id = store
+        .add_key_with_protocol("b", "https://b.example.com", None, "sk-b")
+        .await
+        .unwrap();
+    store.set_code_model(&key_b_id, "model-b").await.unwrap();
+    let key_a_full = store.get_key_by_id(&key_a).await.unwrap().unwrap();
+    let key_b_full = store.get_key_by_id(&key_b_id).await.unwrap().unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.session_store = store.clone();
+    app.key = key_a_full;
+
+    app.begin_key_switch(key_b_full).await.unwrap();
+    app.tx
+        .send(RuntimeEvent::ModelsLoaded(Err("no listing".to_string())))
+        .unwrap();
+    app.handle_runtime_events().await.unwrap();
+
+    assert_eq!(app.key.id, key_b_id, "switch fell back to the saved model");
+    assert_eq!(app.raw_model, "model-b");
+}
+
+#[tokio::test]
+async fn test_key_picker_focuses_active_key() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = SessionStore::with_path(temp_dir.path().join("config.json"));
+    store
+        .add_key_with_protocol("a", "https://a.example.com", None, "sk-a")
+        .await
+        .unwrap();
+    let key_b_id = store
+        .add_key_with_protocol("b", "https://b.example.com", None, "sk-b")
+        .await
+        .unwrap();
+    let key_b_full = store.get_key_by_id(&key_b_id).await.unwrap().unwrap();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.session_store = store.clone();
+    app.key = key_b_full;
+
+    app.open_key_picker(None).await.unwrap();
+
+    let Overlay::Picker(picker) = &app.overlay else {
+        panic!("expected key picker");
+    };
+    assert_eq!(picker.selected, 1, "active key is focused");
+}
+
+#[tokio::test]
+async fn test_model_picker_focuses_model_in_use() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.raw_model = "model-two".to_string();
+
+    app.open_model_picker(None, ModelSelectionTarget::CurrentChat, false);
+    app.populate_model_picker(vec![
+        choice("model-one"),
+        choice("model-two"),
+        choice("model-three"),
+    ]);
+
+    let Overlay::Picker(picker) = &app.overlay else {
+        panic!("expected model picker");
+    };
+    assert_eq!(picker.selected, 1, "model in use is focused");
 }
 
 #[tokio::test]

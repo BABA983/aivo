@@ -33,6 +33,13 @@ pub(super) fn notice_text(app: &CodeTuiApp) -> &str {
     app.notice.as_ref().map(|(_, n)| n.as_str()).unwrap_or("")
 }
 
+/// Theme is process-global: tests that flip it and tests that compare palette
+/// colors across draws must not overlap.
+pub(super) fn theme_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Pin dispatch to the plain-chat path (image in history + unknown vision), so
 /// tests don't touch the agent-engine build (real config/git).
 pub(super) fn pin_to_plain_chat(app: &mut CodeTuiApp) {

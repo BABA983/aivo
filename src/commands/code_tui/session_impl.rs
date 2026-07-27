@@ -354,17 +354,16 @@ is preserved."
         self.open_key_picker(None).await
     }
 
-    /// Apply a key switch directly, keeping the conversation (even across
-    /// providers) — no reset, no confirm (see `complete_key_switch`). Uses the
-    /// key's saved model, else opens the model picker.
+    /// Always via the model picker (saved model focused) so an old choice is
+    /// confirmed, not silently reused; the switch lands on pick, Esc cancels.
     pub(super) async fn begin_key_switch(&mut self, mut key: ApiKey) -> Result<()> {
         SessionStore::decrypt_key_secret(&mut key)?;
-        if let Some(raw_model) = self.session_store.get_code_model(&key.id).await? {
-            self.complete_key_switch(key, raw_model).await?;
-        } else {
-            self.overlay = Overlay::None;
-            self.open_model_picker(None, ModelSelectionTarget::KeySwitch(key), false);
-        }
+        let prior_model = self.session_store.get_code_model(&key.id).await?;
+        self.open_model_picker(
+            None,
+            ModelSelectionTarget::KeySwitch { key, prior_model },
+            false,
+        );
         Ok(())
     }
 
@@ -375,14 +374,22 @@ is preserved."
             return Ok(());
         }
 
-        self.overlay = Overlay::Picker(Box::new(PickerState::ready(
+        let mut picker = PickerState::ready(
             "Keys",
             query.unwrap_or_default(),
             key_picker_items(keys),
             PickerKind::Key {
                 target: KeySelectionTarget::Switch,
             },
-        )));
+        );
+        picker.selected = picker
+            .filtered_items()
+            .iter()
+            .position(
+                |(_, item)| matches!(&item.value, PickerValue::Key(key) if key.id == self.key.id),
+            )
+            .unwrap_or(0);
+        self.overlay = Overlay::Picker(Box::new(picker));
         Ok(())
     }
 
@@ -2621,7 +2628,7 @@ is preserved."
                     };
                     self.notice = Some((MUTED(), msg));
                 }
-                ModelSelectionTarget::KeySwitch(key) => {
+                ModelSelectionTarget::KeySwitch { key, .. } => {
                     self.complete_key_switch(key, model).await?
                 }
                 ModelSelectionTarget::VisionDescriber(key) => {
@@ -2746,7 +2753,7 @@ is preserved."
                 ..
             } => Some(self.key.clone()),
             PickerKind::Model {
-                target: ModelSelectionTarget::KeySwitch(key),
+                target: ModelSelectionTarget::KeySwitch { key, .. },
                 ..
             }
             | PickerKind::Model {

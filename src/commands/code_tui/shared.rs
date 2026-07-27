@@ -1653,7 +1653,11 @@ pub(super) enum PlanCarry {
 #[allow(clippy::large_enum_variant)]
 pub(super) enum ModelSelectionTarget {
     CurrentChat,
-    KeySwitch(ApiKey),
+    KeySwitch {
+        key: ApiKey,
+        /// Saved model: picker focus, and the fallback when there's no listing.
+        prior_model: Option<String>,
+    },
     VisionDescriber(ApiKey),
 }
 

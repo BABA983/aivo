@@ -1518,6 +1518,22 @@ impl CodeTuiApp {
                 }
             }
             Err(err) => {
+                // No listing to pick from — a saved model still lands the switch.
+                if let Overlay::Picker(picker) = &self.overlay
+                    && let PickerKind::Model {
+                        target:
+                            ModelSelectionTarget::KeySwitch {
+                                key,
+                                prior_model: Some(prior),
+                            },
+                        ..
+                    } = &picker.kind
+                {
+                    let (key, prior) = (key.clone(), prior.clone());
+                    self.overlay = Overlay::None;
+                    self.complete_key_switch(key, prior).await?;
+                    return Ok(());
+                }
                 self.overlay = Overlay::None;
                 self.notice = Some((ERROR(), err));
             }
@@ -1525,7 +1541,7 @@ impl CodeTuiApp {
         Ok(())
     }
 
-    fn populate_model_picker(&mut self, models: Vec<ModelChoice>) -> Option<usize> {
+    pub(super) fn populate_model_picker(&mut self, models: Vec<ModelChoice>) -> Option<usize> {
         let Overlay::Picker(picker) = &mut self.overlay else {
             return None;
         };
@@ -1544,12 +1560,26 @@ impl CodeTuiApp {
         } else {
             models
         };
-        // Re-picking starts from the current describer.
-        let stored = match (&describer_key, &self.vision_fallback_custom) {
-            (Some(key_id), Some((id, model))) if key_id == id => {
-                models.iter().position(|m| &m.id == model)
-            }
-            _ => None,
+        // Focus the remembered choice per target.
+        let stored = match &picker.kind {
+            PickerKind::Model {
+                target: ModelSelectionTarget::CurrentChat,
+                ..
+            } => models.iter().position(|m| m.id == self.raw_model),
+            PickerKind::Model {
+                target:
+                    ModelSelectionTarget::KeySwitch {
+                        prior_model: Some(prior),
+                        ..
+                    },
+                ..
+            } => models.iter().position(|m| &m.id == prior),
+            _ => match (&describer_key, &self.vision_fallback_custom) {
+                (Some(key_id), Some((id, model))) if key_id == id => {
+                    models.iter().position(|m| &m.id == model)
+                }
+                _ => None,
+            },
         };
 
         picker.items = models

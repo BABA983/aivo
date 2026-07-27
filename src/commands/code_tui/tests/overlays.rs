@@ -322,6 +322,7 @@ async fn test_config_overlay_toggles_thinking() {
 
 #[tokio::test]
 async fn test_config_overlay_cycles_theme() {
+    let _theme = theme_lock();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     assert_eq!(app.theme, UiTheme::Dark);

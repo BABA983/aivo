@@ -203,6 +203,8 @@ fn test_selection_highlight_preserves_rendered_text_and_foreground() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    let _theme = theme_lock();
+
     fn rendered_cells(app: &mut CodeTuiApp) -> Vec<(String, Color)> {
         let backend = TestBackend::new(48, 12);
         let mut terminal = Terminal::new(backend).unwrap();
