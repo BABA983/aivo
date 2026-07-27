@@ -45,9 +45,35 @@ pub fn packs_root() -> Option<PathBuf> {
     Some(crate::services::paths::config_dir().join("packs"))
 }
 
-/// Parsed-pack cache keyed by (root, root mtime); install/remove touch a
-/// direct child of the root, so its mtime bump invalidates the entry.
-static PACKS_CACHE: Mutex<Vec<(PathBuf, SystemTime, Vec<Pack>)>> = Mutex::new(Vec::new());
+/// Child-dir listing stamp — root mtime alone misses create/remove on Windows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PacksRootStamp {
+    children: Vec<(String, SystemTime)>,
+}
+
+static PACKS_CACHE: Mutex<Vec<(PathBuf, PacksRootStamp, Vec<Pack>)>> = Mutex::new(Vec::new());
+
+fn packs_root_stamp(root: &Path) -> Option<PacksRootStamp> {
+    let entries = std::fs::read_dir(root).ok()?;
+    let mut children: Vec<(String, SystemTime)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let ft = e.file_type().ok()?;
+            if !ft.is_dir() {
+                return None;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((name, mtime))
+        })
+        .collect();
+    children.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(PacksRootStamp { children })
+}
+
+fn invalidate_packs_cache(root: &Path) {
+    PACKS_CACHE.lock().unwrap().retain(|(r, _, _)| r != root);
+}
 
 pub fn installed_packs() -> Vec<Pack> {
     packs_root()
@@ -56,19 +82,19 @@ pub fn installed_packs() -> Vec<Pack> {
 }
 
 fn installed_packs_cached(root: &Path) -> Vec<Pack> {
-    let Ok(mtime) = std::fs::metadata(root).and_then(|m| m.modified()) else {
+    let Some(stamp) = packs_root_stamp(root) else {
         return installed_packs_at(root);
     };
     {
         let cache = PACKS_CACHE.lock().unwrap();
-        if let Some((_, _, packs)) = cache.iter().find(|(r, t, _)| r == root && *t == mtime) {
+        if let Some((_, _, packs)) = cache.iter().find(|(r, s, _)| r == root && *s == stamp) {
             return packs.clone();
         }
     }
     let packs = installed_packs_at(root);
     let mut cache = PACKS_CACHE.lock().unwrap();
     cache.retain(|(r, _, _)| r != root);
-    cache.push((root.to_path_buf(), mtime, packs.clone()));
+    cache.push((root.to_path_buf(), stamp, packs.clone()));
     packs
 }
 
@@ -205,6 +231,7 @@ pub fn install_tree(root: &Path, name: &str, src: &Path) -> Result<PathBuf, Stri
         let _ = std::fs::remove_dir_all(&dest);
         format!("copy pack: {e}")
     })?;
+    invalidate_packs_cache(root);
     Ok(dest)
 }
 
@@ -226,7 +253,9 @@ pub fn remove(root: &Path, name: &str) -> Result<(), String> {
             format!("no pack `{name}`. Installed: {}", known.join(", "))
         });
     }
-    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove pack `{name}`: {e}"))
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("remove pack `{name}`: {e}"))?;
+    invalidate_packs_cache(root);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,13 +370,13 @@ mod tests {
         let packs = installed_packs_cached(&root);
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].name, "alpha-name");
-        // In-place manifest edit: root mtime unchanged → cached parse served.
+        // In-place manifest edit: stamp unchanged → cached parse served.
         write(
             root.join("alpha/.claude-plugin/plugin.json"),
             r#"{"name":"renamed"}"#,
         );
         assert_eq!(installed_packs_cached(&root)[0].name, "alpha-name");
-        // Install bumps root mtime → whole set re-parsed.
+        // New direct child changes the stamp → whole set re-parsed.
         write(
             root.join("beta/.claude-plugin/plugin.json"),
             r#"{"name":"beta-name"}"#,
