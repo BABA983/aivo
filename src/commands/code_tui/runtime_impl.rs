@@ -1102,14 +1102,6 @@ impl CodeTuiApp {
             if let Some(src) = &vision_shim {
                 engine.merge_image_descriptions(&vision_descriptions);
                 let todo = engine.undescribed_images(multimodal.as_ref());
-                if !todo.is_empty() {
-                    let noun = if todo.len() == 1 { "image" } else { "images" };
-                    let _ = ui.tx.send(RuntimeEvent::AgentNotice(format!(
-                        "describing {} {noun} via {}…",
-                        todo.len(),
-                        src.label()
-                    )));
-                }
                 // Independent calls, so pay one round trip rather than N.
                 let (client, base, auth) = (&client, &base, &auth);
                 let described =
@@ -1662,25 +1654,9 @@ impl CodeTuiApp {
         let attachment = build_pending_attachment(&path)?;
         let name = attachment.name.clone();
         let kind = attachment_kind_label(&attachment);
-        let is_image = attachment.is_image();
         self.draft_attachments.push(attachment);
-        let base = format!("Queued {kind}: {name}");
-        self.notice = Some((MUTED(), self.with_vision_attach_hint(base, is_image)));
+        self.notice = Some((MUTED(), format!("Queued {kind}: {name}")));
         Ok(())
-    }
-
-    /// Announce the describer at attach time, not at send time.
-    pub(super) fn with_vision_attach_hint(&self, base: String, is_image: bool) -> String {
-        if !is_image || self.model_image_input != Some(false) {
-            return base;
-        }
-        match self.describer_status().label() {
-            Some(describer) => format!(
-                "{base} · will be described via {describer} ({} can't see images)",
-                self.model
-            ),
-            None => base,
-        }
     }
 
     pub(super) fn detach_attachment(&mut self, index: usize) -> Result<()> {
@@ -3464,6 +3440,8 @@ pieces and keep going"
         self.pristine_import_len = None;
         self.import_fidelity = None;
         self.history.clear();
+        // After the persist above — the next session's file must not inherit these.
+        self.vision_descriptions.clear();
         self.agent_turn_indices.clear();
         self.expanded_thinking.clear();
         self.expanded_output.clear();

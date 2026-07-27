@@ -752,6 +752,7 @@ async fn resolve_resume_session(
                         engine_messages: Some(transcript.engine_messages),
                         import_fidelity: Some(transcript.fidelity),
                         plan_state: None,
+                        image_descriptions: None,
                         updated_at: now.clone(),
                         created_at: now,
                     })

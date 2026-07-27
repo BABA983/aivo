@@ -134,11 +134,11 @@ async fn test_share_command_stop_and_usage_notices() {
 
     // `/share stop` with no active share → informative notice, nothing started.
     app.run_share_command(Some("stop".to_string())).await;
-    assert!(
-        app.notice.as_ref().unwrap().1.contains("Not currently"),
-        "notice: {:?}",
-        app.notice
-    );
+    let (color, text) = app.notice.clone().unwrap();
+    assert!(text.contains("Not currently"), "notice: {text:?}");
+    assert_eq!(color, INFO());
+    let shown = notice_display(app.notice.as_ref()).unwrap().1;
+    assert!(shown.starts_with("ⓘ "), "shown: {shown:?}");
     assert!(app.share.handle.is_none());
 
     // Unknown argument → usage notice (no background start).
@@ -173,6 +173,40 @@ async fn test_share_command_reshows_url_then_stops() {
     // `/share stop` tears it down.
     app.run_share_command(Some("stop".to_string())).await;
     assert!(app.share.handle.is_none());
+    assert!(app.notice.as_ref().unwrap().1.contains("stopped"));
+}
+
+// Clicking the footer badge opens the share modal; `c` copies, `s` stops.
+#[tokio::test]
+async fn test_share_badge_click_opens_share_modal() {
+    use crate::services::share_live::LiveShareHandle;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.share.handle = Some(LiveShareHandle::for_test(
+        "https://s.getaivo.dev/v.html?t=keep",
+    ));
+
+    // Rendering arms the real hitbox.
+    render_full_screen(&mut app, 80, 12);
+    let hit = app.share_badge_hit.expect("badge hitbox armed");
+    app.handle_mouse(left_click(hit.x + hit.width / 2, hit.y))
+        .await
+        .unwrap();
+    assert!(matches!(app.overlay, Overlay::Share { .. }));
+    let (screen, _) = render_full_screen(&mut app, 80, 24);
+    assert!(screen.contains("t=keep"), "modal missing URL:\n{screen}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(app.toast.is_some(), "copy toast missing");
+    assert!(matches!(app.overlay, Overlay::Share { .. }));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+    assert!(app.share.handle.is_none());
+    assert!(matches!(app.overlay, Overlay::None));
     assert!(app.notice.as_ref().unwrap().1.contains("stopped"));
 }
 

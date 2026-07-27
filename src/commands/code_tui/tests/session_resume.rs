@@ -551,6 +551,7 @@ async fn test_resume_resets_plan_and_goal_state() {
         source_newer: false,
         import_fidelity: None,
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -565,6 +566,49 @@ async fn test_resume_resets_plan_and_goal_state() {
         "card index points at replaced history"
     );
     assert!(app.goal_mode.is_none());
+}
+
+/// The saved describe cache comes back on resume (images stay cache hits);
+/// `/new` clears it so the next session's file can't inherit it.
+#[tokio::test]
+async fn test_resume_restores_image_descriptions_and_new_clears_them() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.vision_descriptions
+        .insert("stale".to_string(), "old session's entry".to_string());
+
+    let session = LoadedSession {
+        key_id: app.key.id.clone(),
+        session_id: "resumed".to_string(),
+        raw_model: "claude".to_string(),
+        messages: vec![],
+        engine_messages: None,
+        pristine_import: false,
+        source_newer: false,
+        import_fidelity: None,
+        plan_state: None,
+        image_descriptions: Some(std::collections::HashMap::from([(
+            "abcd1234".to_string(),
+            "[Image] a red button".to_string(),
+        )])),
+    };
+    app.apply_loaded_session(session).await.unwrap();
+
+    assert_eq!(
+        app.vision_descriptions.get("abcd1234").map(String::as_str),
+        Some("[Image] a red button"),
+        "saved cache restored"
+    );
+    assert!(
+        !app.vision_descriptions.contains_key("stale"),
+        "old session's cache replaced, not merged"
+    );
+
+    app.start_new_chat().await;
+    assert!(
+        app.vision_descriptions.is_empty(),
+        "/new must not carry descriptions into the next session's file"
+    );
 }
 
 /// A resumed session with a saved unfinished plan picks it back up: plan mode
@@ -600,6 +644,7 @@ async fn test_resume_restores_unfinished_plan() {
             draft: Some(plan_text.to_string()),
             steps: None,
         }),
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -640,6 +685,7 @@ async fn test_fresh_import_announces_fidelity_saved_fork_stays_silent() {
         source_newer: false,
         import_fidelity: Some(fidelity.clone()),
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -661,6 +707,7 @@ async fn test_fresh_import_announces_fidelity_saved_fork_stays_silent() {
         source_newer: false,
         import_fidelity: Some(crate::services::session_import::ImportFidelity::default()),
         plan_state: None,
+        image_descriptions: None,
     };
     app.notice = None;
     app.apply_loaded_session(saved).await.unwrap();
@@ -1231,6 +1278,7 @@ async fn test_resume_resets_agent_engine() {
         source_newer: false,
         import_fidelity: None,
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -1285,6 +1333,7 @@ async fn test_resume_footer_estimate_uses_durable_transcript() {
         source_newer: false,
         import_fidelity: None,
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -1345,6 +1394,7 @@ async fn test_resume_restores_session_cost_and_billed_model() {
         source_newer: false,
         import_fidelity: None,
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 
@@ -1385,6 +1435,7 @@ async fn test_resume_does_not_overwrite_persisted_default_model() {
         source_newer: false,
         import_fidelity: None,
         plan_state: None,
+        image_descriptions: None,
     };
     app.apply_loaded_session(session).await.unwrap();
 

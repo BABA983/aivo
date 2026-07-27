@@ -116,6 +116,8 @@ async fn known_vision_and_unknown_models_bypass_the_shim() {
 async fn image_described_event_populates_session_cache() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx.clone(), rx);
+    // Persist first so the immediate on-event write has a file to land in.
+    app.persist_history().await.unwrap();
     tx.send(RuntimeEvent::ImageDescribed {
         hash: "abc123".to_string(),
         text: "[Image] a red button".to_string(),
@@ -126,6 +128,56 @@ async fn image_described_event_populates_session_cache() {
         app.vision_descriptions.get("abc123").map(String::as_str),
         Some("[Image] a red button")
     );
+    let stored = app
+        .session_store
+        .get_code_session(&app.session_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .image_descriptions
+        .unwrap();
+    assert_eq!(
+        stored.get("abc123").map(String::as_str),
+        Some("[Image] a red button"),
+        "persisted immediately, not just at turn end"
+    );
+}
+
+/// The learn-on-400 retry must cover a resumed session whose image lives only
+/// in HISTORY (the first send after resume 400s with no image in the draft).
+#[tokio::test]
+async fn retry_coverage_includes_history_only_images() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    // Gateway coverage reads the process-global exhausted latch.
+    let _guard = crate::services::vision_describe::TEST_DESCRIBE_LOCK
+        .lock()
+        .await;
+    app.vision_fallback = VisionFallbackMode::Gateway;
+    assert!(
+        !app.vision_retry_covered(),
+        "no image anywhere → nothing to retry"
+    );
+
+    app.history.push(ChatMessage {
+        model: None,
+        role: "user".to_string(),
+        content: "what is this".to_string(),
+        reasoning_content: None,
+        attachments: vec![image_attachment()],
+    });
+    assert!(
+        app.vision_retry_covered(),
+        "history image + gateway describer → retryable"
+    );
+
+    app.vision_fallback = VisionFallbackMode::Off;
+    assert!(!app.vision_retry_covered(), "no describer → not retryable");
+
+    app.history.clear();
+    app.vision_fallback = VisionFallbackMode::Gateway;
+    app.draft_attachments.push(image_attachment());
+    assert!(app.vision_retry_covered(), "draft image still qualifies");
 }
 
 #[tokio::test]
@@ -396,25 +448,26 @@ fn describer_picker_filters_to_vision_models_cheapest_first() {
     assert_eq!(unknown_only.len(), 2, "all-unknown catalogs pass through");
 }
 
+/// The working fallback is invisible: no describer announcement at attach time.
 #[tokio::test]
-async fn attaching_an_image_announces_the_describer() {
+async fn attaching_an_image_stays_silent_about_the_describer() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     app.model_image_input = Some(false);
     app.vision_fallback = VisionFallbackMode::Custom;
     app.vision_fallback_custom = Some(("k1".to_string(), "gemini-2.5-flash-lite".to_string()));
 
-    let hinted = app.with_vision_attach_hint("Pasted image: shot.png".to_string(), true);
+    let dir = crate::test_sandbox::tmp("aivo-attach");
+    let path = dir.join("shot.png");
+    std::fs::write(&path, b"fakepng").unwrap();
+    app.queue_attachment(path.to_string_lossy().into_owned())
+        .unwrap();
+    let msg = notice_text(&app);
+    assert!(msg.starts_with("Queued"), "attach notice shown: {msg}");
     assert!(
-        hinted.contains("described via gemini-2.5-flash-lite"),
-        "{hinted}"
+        !msg.contains("described via"),
+        "attach notice must not mention the describer: {msg}"
     );
-
-    let plain = app.with_vision_attach_hint("Queued file: a.pdf".to_string(), false);
-    assert_eq!(plain, "Queued file: a.pdf");
-    app.vision_fallback = VisionFallbackMode::Off;
-    let off = app.with_vision_attach_hint("Pasted image: shot.png".to_string(), true);
-    assert_eq!(off, "Pasted image: shot.png");
 }
 
 #[tokio::test]

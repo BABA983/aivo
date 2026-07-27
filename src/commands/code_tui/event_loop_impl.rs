@@ -243,6 +243,11 @@ impl CodeTuiApp {
             RuntimeEvent::ImageDescribed { hash, text } => {
                 // Session-lifetime mirror of the engine cache — survives rebuilds.
                 self.vision_descriptions.insert(hash, text);
+                // Persist immediately (paid work); no-op until the file exists.
+                let _ = self
+                    .session_store
+                    .set_image_descriptions(&self.session_id, &self.vision_descriptions)
+                    .await;
             }
             RuntimeEvent::DescribeFailed { message } => self.abort_undispatched_turn(message),
             RuntimeEvent::AgentFinished {
@@ -1481,24 +1486,24 @@ impl CodeTuiApp {
         self.notice = Some((ERROR(), reframe_image_input_error(err, &self.model)));
     }
 
+    /// Retryable through the shim: an image in scope (draft OR history — a
+    /// resumed session can 400 with no draft image) and a describer configured.
+    pub(super) fn vision_retry_covered(&self) -> bool {
+        let has_image =
+            self.draft_attachments.iter().any(|a| a.is_image()) || self.history_has_image();
+        has_image && self.describer_status().label().is_some()
+    }
+
     /// `false` leaves the composer untouched for the caller's error notice.
     async fn retry_via_vision_fallback(&mut self) -> bool {
-        if !self.draft_attachments.iter().any(|a| a.is_image())
-            || self.describer_status().label().is_none()
-        {
+        if !self.vision_retry_covered() {
             return false;
         }
         let retry = self.draft.clone();
         if self.dispatch_user_message(retry, None).await.is_err() || !self.sending {
             return false;
         }
-        self.notice = Some((
-            MUTED(),
-            format!(
-                "{} can't read images — retrying with the vision fallback…",
-                self.model
-            ),
-        ));
+        // Silent by design: the fallback working is not news, only its failures.
         true
     }
 
@@ -2281,6 +2286,14 @@ impl CodeTuiApp {
                     self.open_session_overlay();
                     return Ok(false);
                 }
+                // Clicking the footer share badge opens the share modal.
+                if !self.overlay.blocks_input()
+                    && let Some(hit) = self.share_badge_hit
+                    && rect_contains(hit, (mouse.column, mouse.row))
+                {
+                    self.open_share_overlay();
+                    return Ok(false);
+                }
                 // A press in the composer also drops the caret there; a drag still selects.
                 if self.should_show_input_cursor()
                     && !self.overlay.blocks_input()
@@ -2907,6 +2920,14 @@ impl CodeTuiApp {
                 Ok(Some(false))
             }
             (Overlay::Session { .. }, _) => Ok(Some(false)),
+            (Overlay::Share { .. }, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {
+                let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+                if let Overlay::Share { scroll } = &mut self.overlay {
+                    *scroll = wheel_scroll(*scroll, up);
+                }
+                Ok(Some(false))
+            }
+            (Overlay::Share { .. }, _) => Ok(Some(false)),
             // Wheel: detail scroll in a drill-in or over the split's right pane,
             // else selection move; add-input ignores it.
             (Overlay::Skills(_), MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) => {

@@ -53,6 +53,7 @@ pub(super) struct Palette {
     pub quote: Color,
     pub error: Color,
     pub warning: Color,
+    pub info: Color,
     pub live: Color,
     pub diff_add_bg: Color,
     pub diff_del_bg: Color,
@@ -93,6 +94,7 @@ impl Palette {
         quote: Color::Rgb(150, 150, 128),
         error: Color::Rgb(228, 128, 114),
         warning: Color::Rgb(224, 180, 104),
+        info: Color::Rgb(126, 184, 212),
         live: Color::Rgb(232, 96, 92),
         diff_add_bg: Color::Rgb(26, 42, 32),
         diff_del_bg: Color::Rgb(48, 30, 30),
@@ -129,6 +131,7 @@ impl Palette {
         quote: Color::Rgb(120, 120, 100),
         error: Color::Rgb(185, 72, 46),   // --code-flag
         warning: Color::Rgb(122, 90, 30), // --code-string
+        info: Color::Rgb(50, 105, 160),
         live: Color::Rgb(200, 60, 55),
         diff_add_bg: Color::Rgb(220, 240, 225),
         diff_del_bg: Color::Rgb(250, 230, 228),
@@ -245,6 +248,11 @@ pub(super) fn WARNING() -> Color {
 }
 #[allow(non_snake_case)]
 #[inline]
+pub(super) fn INFO() -> Color {
+    palette().info
+}
+#[allow(non_snake_case)]
+#[inline]
 pub(super) fn LIVE() -> Color {
     palette().live
 }
@@ -316,6 +324,10 @@ pub(super) fn SELECT_FLASH() -> Color {
 
 /// Share URL notice prefix; `notice_spans` matches it to color the line.
 pub(super) const LIVE_NOTICE_PREFIX: &str = "● Sharing: ";
+/// Informational notice; `notice_display` adds the `ⓘ` marker at render time.
+pub(super) fn info_notice(text: impl Into<String>) -> (Color, String) {
+    (INFO(), text.into())
+}
 /// Footer badge shown while sharing.
 pub(super) const LIVE_BADGE: &str = "● sharing";
 /// Footer badge shown when `/config` "Agent tools" is off (plain-chat mode).
@@ -833,6 +845,8 @@ pub(super) struct LoadedSession {
     /// Unfinished plan-mode snapshot saved with the session (drafted plan +
     /// plan-mode flag), restored on resume so `/plan go` keeps working.
     pub(super) plan_state: Option<crate::services::session_store::PlanState>,
+    /// Saved describe cache, restored so resume doesn't re-describe.
+    pub(super) image_descriptions: Option<std::collections::HashMap<String, String>>,
 }
 
 impl LoadedSession {
@@ -847,6 +861,7 @@ impl LoadedSession {
             source_newer: false,
             import_fidelity: state.import_fidelity,
             plan_state: state.plan_state,
+            image_descriptions: state.image_descriptions,
         }
     }
 }
@@ -1537,6 +1552,10 @@ pub(super) enum Overlay {
     /// `/session` (or clicking the footer id) — this session's id, provenance,
     /// model, key, and resume command. `scroll` for tiny terminals.
     Session {
+        scroll: u16,
+    },
+    /// Clicking the footer `● sharing` badge — the live share's URL and controls.
+    Share {
         scroll: u16,
     },
     Picker(Box<PickerState>),
@@ -2898,6 +2917,8 @@ pub(super) struct CodeTuiApp {
     /// opens the session-detail overlay. `None` when the id isn't shown (narrow
     /// terminal or empty id).
     pub(super) session_id_hit: Option<Rect>,
+    /// Footer `● sharing` badge click region; `None` while not sharing.
+    pub(super) share_badge_hit: Option<Rect>,
     /// The composer text region from the last render, for mouse cursor-placement
     /// and the key-handler's wrap math (it needs the width before the next frame).
     /// `None` until the first render.
@@ -3442,6 +3463,7 @@ impl CodeTuiApp {
             transcript_hitbox: None,
             jump_to_bottom_hit: None,
             session_id_hit: None,
+            share_badge_hit: None,
             composer_text_area: None,
             composer_scroll: 0,
             transcript_selection: None,

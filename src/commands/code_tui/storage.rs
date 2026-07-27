@@ -82,6 +82,7 @@ pub(super) async fn load_or_import_resume_session(
                 source_newer: false,
                 import_fidelity: Some(transcript.fidelity),
                 plan_state: None,
+                image_descriptions: None,
             }),
         };
     }

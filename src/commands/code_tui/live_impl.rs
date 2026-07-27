@@ -11,9 +11,9 @@ impl CodeTuiApp {
         match arg.as_deref().map(str::trim) {
             Some("stop") | Some("off") | Some("end") => {
                 if self.stop_live_share() {
-                    self.notice = Some((MUTED(), "Sharing stopped.".to_string()));
+                    self.notice = Some(info_notice("Sharing stopped."));
                 } else {
-                    self.notice = Some((MUTED(), "Not currently sharing.".to_string()));
+                    self.notice = Some(info_notice("Not currently sharing."));
                 }
             }
             Some(other) if !other.is_empty() && other != "start" && other != "on" => {
@@ -49,7 +49,7 @@ impl CodeTuiApp {
             return;
         }
         if self.share.starting {
-            self.notice = Some((MUTED(), "Share is already starting…".to_string()));
+            self.notice = Some(info_notice("Share is already starting…"));
             return;
         }
         // Persist first so the resolver can read this chat — even an empty one.
@@ -59,7 +59,7 @@ impl CodeTuiApp {
         }
 
         self.share.starting = true;
-        self.notice = Some((MUTED(), "Starting share…".to_string()));
+        self.notice = Some(info_notice("Starting share…"));
 
         let tx = self.tx.clone();
         let session_store = self.session_store.clone();
@@ -100,16 +100,28 @@ impl CodeTuiApp {
 
     /// Show the URL notice and copy it to the clipboard — mouse capture makes
     /// drag-selecting one line unreliable, so paste-ready is the dependable path.
-    /// Copy is best-effort and compiled out under test (never touches the real
-    /// clipboard).
     fn announce_live_url(&mut self, url: &str) {
         // `notice_spans` paints the `LIVE_NOTICE_PREFIX` red and the URL a link color.
         self.notice = Some((LIVE(), format!("{LIVE_NOTICE_PREFIX}{url}")));
+        self.copy_share_url(url);
+    }
+
+    /// Best-effort clipboard copy + toast; treated as success under test (never
+    /// touches the real clipboard).
+    pub(super) fn copy_share_url(&mut self, url: &str) {
         #[cfg(not(test))]
-        {
-            if write_system_clipboard(url).is_ok() {
-                self.show_toast("Share URL copied to clipboard");
-            }
+        let copied = write_system_clipboard(url).is_ok();
+        #[cfg(test)]
+        let copied = !url.is_empty();
+        if copied {
+            self.show_toast("Share URL copied to clipboard");
+        }
+    }
+
+    /// Clicking the footer `● sharing` badge: the live-share detail modal.
+    pub(super) fn open_share_overlay(&mut self) {
+        if self.share.handle.is_some() {
+            self.overlay = Overlay::Share { scroll: 0 };
         }
     }
 
@@ -155,6 +167,9 @@ impl CodeTuiApp {
     pub(super) fn check_live_share_health(&mut self) {
         if self.share.handle.as_ref().is_some_and(|h| h.is_dead()) {
             self.stop_live_share();
+            if matches!(self.overlay, Overlay::Share { .. }) {
+                self.overlay = Overlay::None;
+            }
             self.notice = Some((
                 ERROR(),
                 "Share disconnected — /share to start a new one".to_string(),

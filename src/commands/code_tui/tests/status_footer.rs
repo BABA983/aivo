@@ -1569,16 +1569,23 @@ fn test_footer_shows_share_badge_only_when_sharing() {
         !screen.contains("● sharing"),
         "share badge shown without an active share:\n{screen}"
     );
+    assert!(app.share_badge_hit.is_none(), "stale badge click target");
 
     // Active share → the `● sharing` badge appears in the footer.
     app.share.handle = Some(LiveShareHandle::for_test(
         "https://s.getaivo.dev/v.html?t=ab",
     ));
-    let (screen, _) = render_full_screen(&mut app, 80, 12);
+    let (screen, rows) = render_full_screen(&mut app, 80, 12);
     assert!(
         screen.contains("● sharing"),
         "no share badge in footer while sharing:\n{screen}"
     );
+    let hit = app.share_badge_hit.expect("badge hitbox armed");
+    let row: Vec<char> = rows[usize::from(hit.y)].chars().collect();
+    let hit_text: String = row[usize::from(hit.x)..usize::from(hit.x + hit.width)]
+        .iter()
+        .collect();
+    assert_eq!(hit_text, LIVE_BADGE, "hitbox misaligned:\n{screen}");
 }
 
 /// A running background job shows a `✦ N job(s)` badge in the composer rule.

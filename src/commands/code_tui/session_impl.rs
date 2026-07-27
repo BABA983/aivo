@@ -2815,6 +2815,12 @@ is preserved."
                 .set_import_fidelity(&self.session_id, fidelity)
                 .await;
         }
+        if !self.vision_descriptions.is_empty() {
+            let _ = self
+                .session_store
+                .set_image_descriptions(&self.session_id, &self.vision_descriptions)
+                .await;
+        }
         self.persist_plan_state().await;
         Ok(())
     }
@@ -2965,6 +2971,7 @@ is preserved."
         // the next engine build instead of the lossy text seed. `None` for
         // non-agent or pre-feature sessions → falls back to the text seed.
         self.pending_agent_messages = session.engine_messages;
+        self.vision_descriptions = session.image_descriptions.unwrap_or_default();
         // A freshly-opened foreign import lives in memory only until a real turn
         // grows the transcript past this baseline (then it persists as a fork).
         self.pristine_import_len = session.pristine_import.then_some(self.history.len());

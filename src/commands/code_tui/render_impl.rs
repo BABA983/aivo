@@ -564,25 +564,14 @@ impl CodeTuiApp {
         push_block(lines, bars, indent_sub_block(block), Some(SHELL()));
     }
 
-    /// The transient notice, else the live-share URL — the slot clears every
-    /// turn but the link must stay visible while sharing.
-    pub(super) fn display_notice(&self) -> Option<(Color, String)> {
-        if self.notice.is_some() {
-            return self.notice.clone();
-        }
-        let handle = self.share.handle.as_ref()?;
-        Some((LIVE(), format!("{LIVE_NOTICE_PREFIX}{}", handle.url())))
-    }
-
     fn push_notice_block(&self, lines: &mut Vec<StyledLine>, bars: &mut Vec<Option<Color>>) {
-        let notice = self.display_notice();
-        let Some((color, _)) = notice_display(notice.as_ref()) else {
+        let Some((color, _)) = notice_display(self.notice.as_ref()) else {
             return;
         };
         lines.push(blank_line());
         bars.push(None);
         let mut block = Vec::new();
-        if let Some(spans) = notice_spans(notice.as_ref()) {
+        if let Some(spans) = notice_spans(self.notice.as_ref()) {
             block.push(line_with_plain(spans));
         }
         push_block(lines, bars, indent_sub_block(block), Some(color));
@@ -1046,7 +1035,7 @@ impl CodeTuiApp {
             }
             None => 0usize.hash(&mut hasher),
         }
-        if let Some((color, text)) = notice_display(self.display_notice().as_ref()) {
+        if let Some((color, text)) = notice_display(self.notice.as_ref()) {
             text.as_ref().hash(&mut hasher);
             format!("{color:?}").hash(&mut hasher);
         }
@@ -1352,6 +1341,14 @@ impl CodeTuiApp {
                 self.set_overlay_regions(area);
                 let clamped = self.render_session_overlay(frame, area, scroll);
                 if let Overlay::Session { scroll } = &mut self.overlay {
+                    *scroll = clamped;
+                }
+            }
+            Overlay::Share { scroll } => {
+                let area = centered_rect_fixed(64, 9, body);
+                self.set_overlay_regions(area);
+                let clamped = self.render_share_overlay(frame, area, scroll);
+                if let Overlay::Share { scroll } = &mut self.overlay {
                     *scroll = clamped;
                 }
             }
@@ -2864,7 +2861,7 @@ impl CodeTuiApp {
     }
 
     fn notice_plain_lines(&self, width: u16) -> Vec<String> {
-        notice_display(self.display_notice().as_ref())
+        notice_display(self.notice.as_ref())
             .map(|(_, text)| {
                 let mut lines = vec![String::new()];
                 lines.extend(wrap_plain_lines(&[text.into_owned()], width));
@@ -3047,7 +3044,7 @@ impl CodeTuiApp {
         if self.loading_resume.is_none() {
             lines.extend(self.welcome_status_lines().into_iter().map(|sl| sl.line));
         }
-        if let Some(spans) = notice_spans(self.display_notice().as_ref()) {
+        if let Some(spans) = notice_spans(self.notice.as_ref()) {
             lines.push(Line::from(""));
             lines.push(Line::from(spans));
         }
@@ -3241,9 +3238,10 @@ impl CodeTuiApp {
             width: area.width.saturating_sub(1),
             ..area
         };
-        // Cleared so a frame that omits the id leaves no stale click target;
-        // re-armed below when shown.
+        // Cleared so a frame that omits the id/badge leaves no stale click
+        // target; re-armed below when shown.
         self.session_id_hit = None;
+        self.share_badge_hit = None;
         let width = usize::from(area.width);
         let glue_w = 3usize; // " · "
 
@@ -3271,15 +3269,13 @@ impl CodeTuiApp {
         let tail_w: usize = tail.iter().map(|s| display_width(s.content.as_ref())).sum();
         let live = self.share.handle.is_some();
         let plain_chat = !self.agent_tools_enabled;
-        let badge_w = if live {
-            display_width(LIVE_BADGE) + glue_w
-        } else {
-            0
-        } + if plain_chat {
-            display_width(PLAIN_CODE_BADGE) + glue_w
-        } else {
-            0
-        };
+        let live_badge_w = display_width(LIVE_BADGE);
+        let badge_w = if live { live_badge_w + glue_w } else { 0 }
+            + if plain_chat {
+                display_width(PLAIN_CODE_BADGE) + glue_w
+            } else {
+                0
+            };
         // The host segment is the first thing dropped, then the model itself
         // truncates, so the meter never leaves the corner.
         let host = host_label.filter(|h| {
@@ -3296,8 +3292,14 @@ impl CodeTuiApp {
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         right_spans.push(Span::styled(model_shown, Style::default().fg(MUTED())));
         // Badges sit right after the model they qualify.
+        let mut live_badge_rel = 0usize;
         if live {
             right_spans.push(Span::styled(" · ", Style::default().fg(FAINT())));
+            // Taken at the push site so a span reorder can't drift the click target.
+            live_badge_rel = right_spans
+                .iter()
+                .map(|s| display_width(s.content.as_ref()))
+                .sum();
             right_spans.push(Span::styled(LIVE_BADGE, Style::default().fg(LIVE())));
         }
         if plain_chat {
@@ -3365,6 +3367,14 @@ impl CodeTuiApp {
             " ".repeat(width.saturating_sub(left_w + right_w)),
         ));
         spans.extend(right_spans);
+        if live {
+            self.share_badge_hit = Some(Rect {
+                x: area.x + (width.saturating_sub(right_w) + live_badge_rel) as u16,
+                y: area.y,
+                width: live_badge_w as u16,
+                height: area.height.max(1),
+            });
+        }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 

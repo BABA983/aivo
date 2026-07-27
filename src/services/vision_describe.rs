@@ -19,15 +19,6 @@ pub enum DescriberSource {
     OwnKey { model: String, key: Box<ApiKey> },
 }
 
-impl DescriberSource {
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Gateway => "aivo (gateway)",
-            Self::OwnKey { model, .. } => model.as_str(),
-        }
-    }
-}
-
 const DESCRIBE_PROMPT: &str = "Transcribe this image for a reader who cannot see it. \
 First: all readable text, verbatim, preserving structure (headings, lists, tables, code). \
 Then: a concise layout/visual description — UI elements and arrangement, charts with axes \

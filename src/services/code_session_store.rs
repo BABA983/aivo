@@ -505,8 +505,15 @@ impl CodeSessionStore {
         // so a per-turn or heartbeat persist can't wipe it; `save_agent_messages`
         // refreshes it after a turn (when the engine is lockable). The import
         // fidelity stamp is preserved the same way.
-        let (engine_messages, import_fidelity, plan_state) = existing
-            .map(|s| (s.engine_messages, s.import_fidelity, s.plan_state))
+        let (engine_messages, import_fidelity, plan_state, image_descriptions) = existing
+            .map(|s| {
+                (
+                    s.engine_messages,
+                    s.import_fidelity,
+                    s.plan_state,
+                    s.image_descriptions,
+                )
+            })
             .unwrap_or_default();
         let state = CodeSessionState {
             session_id: session_id.to_string(),
@@ -518,6 +525,7 @@ impl CodeSessionStore {
             engine_messages,
             import_fidelity,
             plan_state,
+            image_descriptions,
             updated_at: now.clone(),
             created_at: created_at.clone(),
         };
@@ -604,6 +612,24 @@ impl CodeSessionStore {
             return Ok(());
         }
         state.plan_state = plan.cloned();
+        self.save_session_file(&state).await
+    }
+
+    /// Refresh the session's describe cache. No-op when the file is absent;
+    /// best-effort like `save_agent_messages`.
+    pub(crate) async fn set_image_descriptions(
+        &self,
+        session_id: &str,
+        descriptions: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let _lock = self.acquire_session_lock()?;
+        let Ok(mut state) = self.load_session_file(session_id).await else {
+            return Ok(());
+        };
+        if descriptions.is_empty() && state.image_descriptions.is_none() {
+            return Ok(());
+        }
+        state.image_descriptions = (!descriptions.is_empty()).then(|| descriptions.clone());
         self.save_session_file(&state).await
     }
 
@@ -914,6 +940,82 @@ mod tests {
 
         // Missing session → no-op, not an error.
         store.save_agent_messages("nope", &convo).await.unwrap();
+    }
+
+    /// `set_image_descriptions` round-trips, survives a later text-only save,
+    /// and is a no-op on a missing session.
+    #[tokio::test]
+    async fn image_descriptions_roundtrip_and_survive_text_save() {
+        let temp_dir = TempDir::new().unwrap();
+        let (store, key_id) = setup_store_with_key(&temp_dir).await;
+
+        let text_save = |store: CodeSessionStore, key_id: String| async move {
+            store
+                .save_code_session_with_id(
+                    &key_id,
+                    "http://localhost",
+                    "/tmp/t",
+                    "s1",
+                    "gpt-4o",
+                    None,
+                    &sample_messages(),
+                    "t",
+                    "t",
+                    SessionTokens::default(),
+                    0.0,
+                )
+                .await
+                .unwrap();
+        };
+
+        // Missing session → no-op, not an error (and nothing created).
+        let descriptions = std::collections::HashMap::from([(
+            "abcd1234".to_string(),
+            "[Image] a red button".to_string(),
+        )]);
+        store
+            .set_image_descriptions("s1", &descriptions)
+            .await
+            .unwrap();
+        assert!(store.get_code_session("s1").await.unwrap().is_none());
+
+        text_save(store.clone(), key_id.clone()).await;
+        assert!(
+            store
+                .get_code_session("s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .image_descriptions
+                .is_none(),
+            "fresh session has no cache"
+        );
+
+        store
+            .set_image_descriptions("s1", &descriptions)
+            .await
+            .unwrap();
+        let stored = store
+            .get_code_session("s1")
+            .await
+            .unwrap()
+            .unwrap()
+            .image_descriptions
+            .unwrap();
+        assert_eq!(
+            stored.get("abcd1234").map(String::as_str),
+            Some("[Image] a red button")
+        );
+
+        // A later text-only (heartbeat) save must NOT wipe the cache.
+        text_save(store.clone(), key_id.clone()).await;
+        let after = store
+            .get_code_session("s1")
+            .await
+            .unwrap()
+            .unwrap()
+            .image_descriptions;
+        assert_eq!(after.map(|d| d.len()), Some(1), "text save preserved it");
     }
 
     #[tokio::test]

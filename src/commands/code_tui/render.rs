@@ -1143,10 +1143,14 @@ pub(super) fn spinner_frame_indexed(frame_tick: usize, reduce_motion: bool) -> &
     spinner_frame(frame_tick / 5)
 }
 
+/// Hue-keyed decoration lives here, not in the stored string, so notices stay
+/// matchable by their plain content.
 pub(super) fn notice_display(notice: Option<&(Color, String)>) -> Option<(Color, Cow<'_, str>)> {
     notice.map(|(color, text)| {
         let formatted = if *color == ERROR() {
             Cow::Owned(format!("Error: {text}"))
+        } else if *color == INFO() {
+            Cow::Owned(format!("ⓘ {text}"))
         } else {
             Cow::Borrowed(text.as_str())
         };

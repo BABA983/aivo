@@ -1282,6 +1282,7 @@ mod tests {
             engine_messages: None,
             import_fidelity: None,
             plan_state: None,
+            image_descriptions: None,
             updated_at: "2026-04-01T10:01:00Z".into(),
             created_at: "2026-04-01T09:55:00Z".into(),
         };
@@ -1349,6 +1350,7 @@ mod tests {
             engine_messages: None,
             import_fidelity: None,
             plan_state: None,
+            image_descriptions: None,
             updated_at: String::new(),
             created_at: String::new(),
         };
@@ -1411,6 +1413,7 @@ mod tests {
             engine_messages: None,
             import_fidelity: None,
             plan_state: None,
+            image_descriptions: None,
             updated_at: String::new(),
             created_at: String::new(),
         };
@@ -1489,6 +1492,7 @@ mod tests {
             engine_messages: None,
             import_fidelity: None,
             plan_state: None,
+            image_descriptions: None,
             updated_at: String::new(),
             created_at: String::new(),
         };

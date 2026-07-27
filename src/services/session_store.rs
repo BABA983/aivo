@@ -957,6 +957,13 @@ pub struct CodeSessionState {
     /// Absent once the plan is approved/discarded (and for legacy sessions).
     #[serde(rename = "planState", default, skip_serializing_if = "Option::is_none")]
     pub plan_state: Option<PlanState>,
+    /// Vision-fallback describe cache (image hash → text); reused on resume.
+    #[serde(
+        rename = "imageDescriptions",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub image_descriptions: Option<std::collections::HashMap<String, String>>,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
     #[serde(rename = "createdAt", default)]
@@ -2485,6 +2492,17 @@ impl SessionStore {
     /// create a session. Best-effort like `save_agent_messages`.
     pub async fn set_plan_state(&self, session_id: &str, plan: Option<&PlanState>) -> Result<()> {
         self.sessions.set_plan_state(session_id, plan).await
+    }
+
+    /// Refresh the session's describe cache; no-op before the file exists.
+    pub async fn set_image_descriptions(
+        &self,
+        session_id: &str,
+        descriptions: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.sessions
+            .set_image_descriptions(session_id, descriptions)
+            .await
     }
 
     /// Write-once; no-op when the session is absent or already stamped.
