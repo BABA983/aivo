@@ -321,6 +321,8 @@ async fn test_config_overlay_toggles_thinking() {
 }
 
 #[tokio::test]
+// Serializing the global theme is the point — the guard must span the awaits.
+#[allow(clippy::await_holding_lock)]
 async fn test_config_overlay_cycles_theme() {
     let _theme = theme_lock();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
