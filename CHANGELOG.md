@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.43.1
+
+A Windows fixes patch. Pasting multi-line text into the code TUI no longer submits the draft once per line, and copying to the clipboard actually copies instead of silently clearing it. Also: login sessions are excluded from `keys export` entirely, the `/review` slash command is gone, and the `/config` vision row names the describer model you actually picked.
+
+- improve(cli): login sessions never export, picker search, single -y flag (c82846c1)
+- improve(code): remove the /review slash command (6a7c2e19)
+- improve(code): /config vision row shows "aivo" and the picked custom model (fc537f19)
+- fix(code): Windows multi-line paste submitted the draft once per line (9a853926)
+- fix(code): Windows clipboard copy silently cleared instead of copying (2283fb49)
+
 ## v0.43.0
 
 An images release. Attachments are clamped to 2000px and re-encoded to ~500KB before they're sent, and text-only models now get a described version instead of an error. `aivo code packs` and `aivo code agents` are removed. Also: a guided `keys export` flow, a `/config` modal built on live values, and pickers that open on the current choice.
