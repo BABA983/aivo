@@ -2557,7 +2557,7 @@ const HELP_COMMAND_GROUPS: &[(&str, &[&str])] = &[
         "Skills & tools",
         &["skills", "create-skill", "agents", "mcp"],
     ),
-    ("Autonomous", &["plan", "goal", "review"]),
+    ("Autonomous", &["plan", "goal"]),
     // Shown only on the aivo provider (hidden by `slash_command_visible`).
     ("aivo account", &["login", "usage", "logout"]),
 ];

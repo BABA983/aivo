@@ -551,12 +551,6 @@ pub(super) const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         takes_argument: true,
     },
     SlashCommandSpec {
-        name: "review",
-        help_label: "/review [ref|scope]",
-        description: "review the working diff (or vs a base ref) — line-by-line findings",
-        takes_argument: true,
-    },
-    SlashCommandSpec {
         name: "rewind",
         help_label: "/rewind",
         description: "rewind to an earlier turn (reverts file edits)",
@@ -2426,8 +2420,6 @@ pub(super) enum SlashCommand {
     /// implementation plan; `go` executes it in a fresh context; bare shows
     /// status, `stop` discards the pending plan.
     Plan(Option<String>),
-    /// Read-only review turn: working diff (bare), or vs a ref / scope.
-    Review(Option<String>),
     /// Show this project's persistent memory (`remember` facts); `dream` consolidates it now.
     Memory {
         dream: bool,

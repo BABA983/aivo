@@ -504,8 +504,6 @@ fn test_command_recall_text_round_trips() {
         SlashCommand::Compact { fast: false },
         SlashCommand::Compact { fast: true },
         SlashCommand::Rewind,
-        SlashCommand::Review(None),
-        SlashCommand::Review(Some("main".to_string())),
         SlashCommand::Goal(Some("ship the fix".to_string())),
         SlashCommand::Plan(Some("go".to_string())),
     ] {

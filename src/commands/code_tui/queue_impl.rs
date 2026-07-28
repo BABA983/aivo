@@ -179,7 +179,6 @@ pub(super) fn command_recall_text(command: &SlashCommand) -> String {
         SlashCommand::Mcp(arg) => with_arg("mcp", arg),
         SlashCommand::Goal(arg) => with_arg("goal", arg),
         SlashCommand::Plan(arg) => with_arg("plan", arg),
-        SlashCommand::Review(arg) => with_arg("review", arg),
         SlashCommand::Memory { dream } => {
             if *dream { "/memory dream" } else { "/memory" }.to_string()
         }

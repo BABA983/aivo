@@ -23,30 +23,6 @@ exactly `GOAL COMPLETE` and nothing else; otherwise do the next step."
     )
 }
 
-/// The `/review` directive: a read-only, line-by-line review of a diff.
-/// Twin: `agent/builtin_agents/evaluate.md` (the delegatable review sub-agent) —
-/// keep review-policy changes in sync.
-const REVIEW_PREAMBLE: &str = "[Code review] Review the changes below as a senior engineer \
-would before a merge. This is READ-ONLY: do not modify, create, or delete any file.\n\
-\n\
-1. Establish the diff. With no target given, review the working diff: `git status --short` \
-plus `git diff HEAD` (staged + unstaged). If the working tree is clean, review the last \
-commit (`git show HEAD`). If a target is given and names a git ref, review \
-`git diff <target>...HEAD` (plus the working diff); if it names a path or topic, restrict \
-the review to that scope.\n\
-2. For every changed hunk, read enough surrounding code to judge it in context — follow \
-callers and callees a change could break. Never judge from the diff alone.\n\
-3. Report only findings that matter: correctness bugs, edge cases, races, security issues, \
-API misuse, behavior changes callers don't expect, dead or duplicated logic, missing tests \
-for risky changes. Skip style nits a formatter or linter would catch.\n\
-4. Present the review as:\n\
-   - One finding per bullet: `file:line — [P0|P1|P2] summary`, then 1-3 sentences of why \
-it's wrong (with a concrete failure scenario) and a suggested fix. P0 = must fix before \
-merge, P1 = should fix, P2 = polish. Order by severity.\n\
-   - A closing verdict paragraph: overall quality, whether it's safe to merge, and what \
-you checked but found sound.\n\
-   - If there are no findings, say so explicitly and list what you verified.";
-
 /// Bare-`/plan` kick-off: interview for an objective. `ask_user` keeps the turn
 /// alive — a prose question would end it and be stamped as a drafted plan.
 pub(super) const PLAN_KICKOFF_MESSAGE: &str = "The user entered plan mode without saying what \
@@ -361,7 +337,7 @@ impl CodeTuiApp {
     }
 
     /// Like [`dispatch_user_message`], but the transcript shows `display`
-    /// (e.g. `/review main`) while the model receives the full `input`.
+    /// (e.g. `/goal — continue`) while the model receives the full `input`.
     pub(super) async fn dispatch_user_message_shown(
         &mut self,
         input: String,
@@ -1054,7 +1030,7 @@ impl CodeTuiApp {
         // Flag the user row as engine-dispatched for the `/rewind` picker match —
         // after every early return, so a turn that never ran stays unflagged.
         // Checkpoint by the row's DISPLAYED content — the picker matches by
-        // transcript text, which can diverge from the expanded prompt (`/review`).
+        // transcript text, which can diverge from the expanded prompt (`/goal`).
         let checkpoint_prompt = match self.history.last() {
             Some(m) if m.role == "user" => {
                 self.agent_turn_indices.insert(self.history.len() - 1);
@@ -1743,10 +1719,6 @@ impl CodeTuiApp {
                 self.run_plan_command(arg).await;
                 Ok(false)
             }
-            SlashCommand::Review(arg) => {
-                self.run_review_command(arg).await;
-                Ok(false)
-            }
             SlashCommand::Memory { dream } => {
                 if dream {
                     self.run_memory_dream_command().await;
@@ -2399,48 +2371,6 @@ impl CodeTuiApp {
             .ok()?;
         crate::agent::memory::apply_dream_result(cwd, &msg.content.unwrap_or_default(), &consumed)
             .ok()
-    }
-
-    /// `/review [ref|scope]`: one agent turn under the review directive — no
-    /// mode state, the directive travels in the message.
-    pub(super) async fn run_review_command(&mut self, arg: Option<String>) {
-        if self.sending {
-            self.queue_command(SlashCommand::Review(arg), "/review");
-            return;
-        }
-        if self.plan_mode {
-            self.notice = Some((
-                ERROR(),
-                "Plan mode is active — approve the plan or /plan stop before /review".to_string(),
-            ));
-            return;
-        }
-        if !self.agent_capable() {
-            self.notice = Some((
-                ERROR(),
-                "/review needs the native agent (an API key or Copilot — not OAuth or cursor)"
-                    .to_string(),
-            ));
-            return;
-        }
-        let target = arg.as_deref().map(str::trim).unwrap_or("");
-        let (prompt, typed) = if target.is_empty() {
-            (
-                format!("{REVIEW_PREAMBLE}\n\nReview target: the current working diff."),
-                "/review".to_string(),
-            )
-        } else {
-            (
-                format!("{REVIEW_PREAMBLE}\n\nReview target: `{target}`"),
-                format!("/review {target}"),
-            )
-        };
-        if let Err(e) = self
-            .dispatch_user_message_shown(prompt, None, Some(typed))
-            .await
-        {
-            self.notice = Some((ERROR(), e.to_string()));
-        }
     }
 
     /// `/goal`: autonomous goal mode. `<objective>` starts it; bare shows
