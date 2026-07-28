@@ -694,6 +694,19 @@ pub(super) enum ClipboardOs {
 pub(super) struct ClipboardCommand {
     pub(super) program: &'static str,
     pub(super) args: &'static [&'static str],
+    /// Base64-encode the piped text: PowerShell decodes raw stdin with the OEM
+    /// codepage, mangling UTF-8.
+    pub(super) base64_stdin: bool,
+}
+
+impl ClipboardCommand {
+    const fn new(program: &'static str, args: &'static [&'static str]) -> Self {
+        Self {
+            program,
+            args,
+            base64_stdin: false,
+        }
+    }
 }
 
 impl fmt::Display for ClipboardCommand {
@@ -720,27 +733,21 @@ pub(super) fn current_clipboard_os() -> ClipboardOs {
 
 pub(super) fn clipboard_command_candidates(os: ClipboardOs) -> Vec<ClipboardCommand> {
     match os {
-        ClipboardOs::Macos => vec![ClipboardCommand {
-            program: "pbcopy",
-            args: &[],
-        }],
+        ClipboardOs::Macos => vec![ClipboardCommand::new("pbcopy", &[])],
         ClipboardOs::Linux => vec![
-            ClipboardCommand {
-                program: "wl-copy",
-                args: &[],
-            },
-            ClipboardCommand {
-                program: "xclip",
-                args: &["-selection", "clipboard"],
-            },
-            ClipboardCommand {
-                program: "xsel",
-                args: &["--clipboard", "--input"],
-            },
+            ClipboardCommand::new("wl-copy", &[]),
+            ClipboardCommand::new("xclip", &["-selection", "clipboard"]),
+            ClipboardCommand::new("xsel", &["--clipboard", "--input"]),
         ],
         ClipboardOs::Windows => vec![ClipboardCommand {
             program: "powershell.exe",
-            args: &["-NoProfile", "-Command", "Set-Clipboard"],
+            args: &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Set-Clipboard -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))",
+            ],
+            base64_stdin: true,
         }],
         ClipboardOs::Other => Vec::new(),
     }
@@ -749,28 +756,21 @@ pub(super) fn clipboard_command_candidates(os: ClipboardOs) -> Vec<ClipboardComm
 /// Read counterpart of [`clipboard_command_candidates`], tried in order.
 pub(super) fn clipboard_read_candidates(os: ClipboardOs) -> Vec<ClipboardCommand> {
     match os {
-        ClipboardOs::Macos => vec![ClipboardCommand {
-            program: "pbpaste",
-            args: &[],
-        }],
+        ClipboardOs::Macos => vec![ClipboardCommand::new("pbpaste", &[])],
         ClipboardOs::Linux => vec![
-            ClipboardCommand {
-                program: "wl-paste",
-                args: &["--no-newline"],
-            },
-            ClipboardCommand {
-                program: "xclip",
-                args: &["-selection", "clipboard", "-o"],
-            },
-            ClipboardCommand {
-                program: "xsel",
-                args: &["--clipboard", "--output"],
-            },
+            ClipboardCommand::new("wl-paste", &["--no-newline"]),
+            ClipboardCommand::new("xclip", &["-selection", "clipboard", "-o"]),
+            ClipboardCommand::new("xsel", &["--clipboard", "--output"]),
         ],
-        ClipboardOs::Windows => vec![ClipboardCommand {
-            program: "powershell.exe",
-            args: &["-NoProfile", "-Command", "Get-Clipboard"],
-        }],
+        ClipboardOs::Windows => vec![ClipboardCommand::new(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Console]::Out.Write([string](Get-Clipboard -Raw))",
+            ],
+        )],
         ClipboardOs::Other => Vec::new(),
     }
 }
@@ -804,7 +804,13 @@ fn write_clipboard_command(candidate: &ClipboardCommand, text: &str) -> Result<(
         .map_err(|err| anyhow::anyhow!("{err}"))?;
 
     if let Some(stdin) = &mut child.stdin {
-        stdin.write_all(text.as_bytes())?;
+        if candidate.base64_stdin {
+            let encoded =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, text.as_bytes());
+            stdin.write_all(encoded.as_bytes())?;
+        } else {
+            stdin.write_all(text.as_bytes())?;
+        }
     }
     let output = child.wait_with_output()?;
     if output.status.success() {

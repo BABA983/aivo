@@ -897,10 +897,14 @@ fn test_clipboard_command_candidates_are_platform_specific() {
             .collect::<Vec<_>>(),
         vec!["wl-copy", "xclip", "xsel"]
     );
-    assert_eq!(
-        clipboard_command_candidates(ClipboardOs::Windows)[0].program,
-        "powershell.exe"
-    );
+    let windows = &clipboard_command_candidates(ClipboardOs::Windows)[0];
+    assert_eq!(windows.program, "powershell.exe");
+    // `-Command` never wires stdin to the pipeline; the script must read it.
+    let script = windows.args.last().unwrap();
+    assert!(script.contains("Set-Clipboard"));
+    assert!(script.contains("ReadToEnd"));
+    assert!(script.contains("FromBase64String"));
+    assert!(windows.base64_stdin);
     assert!(clipboard_command_candidates(ClipboardOs::Other).is_empty());
 }
 
@@ -920,10 +924,12 @@ fn test_clipboard_read_candidates_are_platform_specific() {
             .collect::<Vec<_>>(),
         vec!["wl-paste", "xclip", "xsel"]
     );
-    assert_eq!(
-        clipboard_read_candidates(ClipboardOs::Windows)[0].program,
-        "powershell.exe"
-    );
+    let windows = &clipboard_read_candidates(ClipboardOs::Windows)[0];
+    assert_eq!(windows.program, "powershell.exe");
+    let script = windows.args.last().unwrap();
+    assert!(script.contains("Get-Clipboard"));
+    assert!(script.contains("OutputEncoding"));
+    assert!(!windows.base64_stdin);
     assert!(clipboard_read_candidates(ClipboardOs::Other).is_empty());
 }
 
