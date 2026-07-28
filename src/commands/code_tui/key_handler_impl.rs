@@ -83,6 +83,17 @@ impl CodeTuiApp {
             return Ok(false);
         }
 
+        // A pasted newline (see `drain_input`) is draft text, never a submit or
+        // card decision. Gated like `Event::Paste`.
+        if std::mem::take(&mut self.paste_burst_newline)
+            && !self.overlay.blocks_input()
+            && self.loading_resume.is_none()
+        {
+            self.push_newline();
+            self.sync_command_menu_state();
+            return Ok(false);
+        }
+
         // A project-MCP consent card (a repo's .mcp.json wants to spawn stdio
         // servers) owns the keyboard until decided: y run once, a always (this
         // repo), n/Esc deny. Unrecognized keys are ignored (card stays up).

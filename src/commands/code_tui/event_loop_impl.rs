@@ -1975,7 +1975,22 @@ impl CodeTuiApp {
                 EscStep::Passthrough(event) => event,
             };
 
-            if let Some(true) = self.handle_terminal_event(event).await? {
+            // Windows has no bracketed paste: a paste arrives as a key-event
+            // burst where each newline is a bare Enter, which would submit the
+            // draft once per line. Flag Enters with input still queued behind
+            // them (or deep in the burst — the paste's own trailing newline).
+            if cfg!(windows)
+                && let Event::Key(key) = &event
+                && key.kind == KeyEventKind::Press
+                && matches!(key.code, KeyCode::Enter)
+                && !key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                self.paste_burst_newline = event::poll(Duration::from_millis(0))?
+                    || drained > PASTE_BURST_MIN_PRIOR_EVENTS;
+            }
+            let handled = self.handle_terminal_event(event).await?;
+            self.paste_burst_newline = false;
+            if let Some(true) = handled {
                 return Ok(true);
             }
             if drained >= MAX_INPUT_EVENTS_PER_TICK {

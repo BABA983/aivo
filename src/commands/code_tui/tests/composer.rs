@@ -218,6 +218,55 @@ async fn paste_blocked_while_resume_loading() {
     assert_eq!(app.draft, "");
 }
 
+#[tokio::test]
+async fn paste_burst_enter_inserts_newline_instead_of_submitting() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.sending = true;
+    app.draft = "line1".to_string();
+    app.cursor = app.draft.len();
+
+    app.paste_burst_newline = true;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+        .await
+        .unwrap();
+
+    assert_eq!(app.draft, "line1\nx");
+    assert!(app.queued_messages.is_empty(), "must not submit per line");
+    assert!(!app.paste_burst_newline, "flag is one-shot");
+}
+
+#[tokio::test]
+async fn paste_burst_enter_blocked_while_resume_loading() {
+    // Same gate as Event::Paste: a resume-load blocks composer input.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.loading_resume = Some(LoadingResume {
+        request_id: 1,
+        preview: SessionPreview {
+            key_id: "k".into(),
+            key_name: "k".into(),
+            base_url: "u".into(),
+            session_id: "s".into(),
+            raw_model: "m".into(),
+            updated_at: "t".into(),
+            title: "t".into(),
+            preview_text: "p".into(),
+            origin: None,
+        },
+    });
+
+    app.paste_burst_newline = true;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .unwrap();
+
+    assert_eq!(app.draft, "");
+}
+
 #[test]
 fn test_cursor_movement_basic() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

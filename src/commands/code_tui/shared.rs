@@ -405,6 +405,10 @@ pub(super) const TYPEWRITER_CATCHUP_DIVISOR: usize = 2;
 /// repaint; leftover events are drained on the next tick.
 pub(super) const MAX_INPUT_EVENTS_PER_TICK: usize = 512;
 
+/// An Enter this deep into one drain burst is a pasted newline (a burst spans
+/// ~25ms — no human lands this many keystrokes before an intentional Enter).
+pub(super) const PASTE_BURST_MIN_PRIOR_EVENTS: usize = 8;
+
 // One-column message indent so transcript `❯`/`◆` markers line up with the
 // composer's in-box prompt (border col 0, glyph col 1) and text columns match.
 pub(super) const ACCENT_GUTTER_WIDTH: u16 = 1;
@@ -3061,6 +3065,9 @@ pub(super) struct CodeTuiApp {
     pub(super) pending_ctrl_x: bool,
     /// Chord fired: the event loop opens the draft in $VISUAL/$EDITOR before the next repaint.
     pub(super) pending_external_edit: bool,
+    /// The Enter being dispatched is part of a Windows paste burst — insert a
+    /// newline instead of submitting (see `drain_input`).
+    pub(super) paste_burst_newline: bool,
     /// Live `cursor-agent acp` connection scoped to the current chat session.
     /// `None` outside of cursor keys and before the first turn.
     pub(super) cursor_acp_session: Option<crate::services::cursor_acp::CursorAcpSession>,
@@ -3583,6 +3590,7 @@ impl CodeTuiApp {
             goal_stop_confirm_pending: false,
             pending_ctrl_x: false,
             pending_external_edit: false,
+            paste_burst_newline: false,
             cursor_acp_session: None,
             cursor_prewarm: None,
             cursor_plan_mode: false,
