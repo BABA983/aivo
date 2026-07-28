@@ -673,13 +673,6 @@ is preserved."
         } else {
             "let the model reason (this model has no thinking)"
         };
-        // Model FIRST — a narrow overlay clips the tail.
-        let vision_desc = match (&self.vision_fallback, &self.vision_fallback_custom) {
-            (crate::services::session_store::VisionFallbackMode::Custom, Some((_, model))) => {
-                format!("{model} describes images · enter re-picks")
-            }
-            _ => "describe images for text-only models · custom picks a key + model".to_string(),
-        };
         let items = vec![
             ConfigRow {
                 setting: ConfigSetting::Theme,
@@ -709,10 +702,21 @@ is preserved."
             ConfigRow {
                 setting: ConfigSetting::VisionFallback,
                 label: "Vision fallback",
-                description: vision_desc,
+                description: self.vision_fallback_desc(),
             },
         ];
         self.overlay = Overlay::Config(ConfigOverlay { items, selected: 0 });
+    }
+
+    /// Read fresh at render so a mid-overlay flip to `custom` names the picked
+    /// model. Model first — a narrow overlay clips the tail.
+    pub(super) fn vision_fallback_desc(&self) -> String {
+        match (&self.vision_fallback, &self.vision_fallback_custom) {
+            (crate::services::session_store::VisionFallbackMode::Custom, Some((_, model))) => {
+                format!("{model} describes images · enter re-picks")
+            }
+            _ => "describe images for text-only models · custom picks a key + model".to_string(),
+        }
     }
 
     /// Segmented values for `setting` and which is live — read fresh so the
@@ -744,13 +748,15 @@ is preserved."
             ConfigSetting::UseWebSearch => switch(self.web_search_enabled),
             ConfigSetting::AgentTools => switch(self.agent_tools_enabled),
             ConfigSetting::VisionFallback => {
-                const OPTIONS: &[&str] = &["gateway", "custom", "off"];
+                use crate::services::session_store::VisionFallbackMode;
+                const OPTIONS: &[&str] = &["aivo", "custom", "off"];
                 ConfigSegments {
                     options: OPTIONS,
-                    active: OPTIONS
-                        .iter()
-                        .position(|o| *o == self.vision_fallback.as_str())
-                        .unwrap_or(0),
+                    active: match self.vision_fallback {
+                        VisionFallbackMode::Gateway => 0,
+                        VisionFallbackMode::Custom => 1,
+                        VisionFallbackMode::Off => 2,
+                    },
                 }
             }
         }

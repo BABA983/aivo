@@ -539,6 +539,10 @@ async fn config_vision_row_wraps_description_and_advertises_enter() {
         text.contains("pick model"),
         "custom needs the Enter hint:\n{text}"
     );
+    assert!(
+        text.contains("glm-4.6v describes images"),
+        "picked model missing after mid-overlay flip:\n{text}"
+    );
 }
 
 #[tokio::test]

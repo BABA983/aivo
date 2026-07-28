@@ -459,10 +459,10 @@ async fn config_overlay_renders_live_values_and_focused_options() {
 
     // Theme focused: live values everywhere, alternatives only on that row.
     let text = render(&mut app);
-    for label in ["Theme", "Mode", "dark", "light", "normal", "gateway"] {
+    for label in ["Theme", "Mode", "dark", "light", "normal", "aivo"] {
         assert!(text.contains(label), "{label:?} missing:\n{text}");
     }
-    for hidden in ["review", "auto-approve"] {
+    for hidden in ["review", "auto-approve", "gateway"] {
         assert!(!text.contains(hidden), "{hidden:?} leaked:\n{text}");
     }
     assert!(

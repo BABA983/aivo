@@ -1453,7 +1453,7 @@ pub(super) enum ConfigSetting {
     Approval,
     UseWebSearch,
     AgentTools,
-    /// Describe images for text-only models (`gateway` / `custom` / `off`).
+    /// Describe images for text-only models (`aivo` / `custom` / `off`).
     VisionFallback,
 }
 

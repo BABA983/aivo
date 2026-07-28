@@ -1230,7 +1230,12 @@ impl CodeTuiApp {
         if let Some(item) = state.items.get(state.selected) {
             let segs = self.config_segments(item.setting);
             detail.push(config_options_line(segs.options, segs.active));
-            let mut wrapped = wrap_words(&item.description, inner_width);
+            let description = if item.setting == ConfigSetting::VisionFallback {
+                self.vision_fallback_desc()
+            } else {
+                item.description.clone()
+            };
+            let mut wrapped = wrap_words(&description, inner_width);
             wrapped.resize(CONFIG_DESC_ROWS, String::new());
             detail.extend(
                 wrapped

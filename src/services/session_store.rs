@@ -865,7 +865,8 @@ impl ChatTheme {
 
 /// Persisted vision-fallback mode (`"visionFallback"` in code-prefs.json). The
 /// describer pair lives under the sibling `"visionFallbackCustom"` key so
-/// flipping the mode away and back doesn't lose it.
+/// flipping the mode away and back doesn't lose it. `Gateway` persists as
+/// `"gateway"` but displays as `aivo` in `/config`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VisionFallbackMode {
     #[default]
