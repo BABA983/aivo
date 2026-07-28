@@ -567,15 +567,14 @@ pub struct KeysArgs {
     #[arg(long)]
     pub rename: bool,
 
-    /// On `keys export`, include OAuth/login sessions (Claude, Codex,
-    /// Gemini, Copilot, Cursor login). Off by default — subscription-bound
-    /// credentials shouldn't travel silently with an API-key backup.
-    #[arg(long = "include-oauth")]
+    /// Removed; kept hidden so old scripts get a clear error, not clap's.
+    #[arg(long = "include-oauth", hide = true)]
     pub include_oauth: bool,
 
-    /// On `keys export`, overwrite an existing file at the target path
-    #[arg(long)]
-    pub force: bool,
+    /// `keys rm`: skip the confirmation. `keys export`: overwrite an
+    /// existing target file.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 /// Arguments for the run command
@@ -922,10 +921,9 @@ pub struct LogsArgs {
     #[arg(long, hide = true)]
     pub debug_local_only: bool,
 
-    /// `logs prune`: skip the confirmation and delete. `-f/--force` are
-    /// back-compat aliases for the project-wide `-y/--yes` convention.
-    #[arg(short = 'y', long = "yes", short_alias = 'f', alias = "force")]
-    pub force: bool,
+    /// `logs prune`: skip the confirmation and delete.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 /// Arguments for the code command
@@ -1434,16 +1432,15 @@ mod tests {
 
     #[test]
     fn test_logs_prune_skip_confirm_flag_and_aliases() {
-        let force_of = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
-            Some(Commands::Logs(logs_args)) => logs_args.force,
+        let yes_of = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command {
+            Some(Commands::Logs(logs_args)) => logs_args.yes,
             _ => panic!("Expected Logs command"),
         };
-        // Canonical -y/--yes plus the retained -f/--force back-compat aliases.
-        assert!(force_of(&["aivo", "logs", "prune", "-y"]));
-        assert!(force_of(&["aivo", "logs", "prune", "--yes"]));
-        assert!(force_of(&["aivo", "logs", "prune", "-f"]));
-        assert!(force_of(&["aivo", "logs", "prune", "--force"]));
-        assert!(!force_of(&["aivo", "logs", "prune"]));
+        assert!(yes_of(&["aivo", "logs", "prune", "-y"]));
+        assert!(yes_of(&["aivo", "logs", "prune", "--yes"]));
+        assert!(!yes_of(&["aivo", "logs", "prune"]));
+        // --force is gone, not aliased.
+        assert!(Cli::try_parse_from(["aivo", "logs", "prune", "--force"]).is_err());
     }
 
     /// Helper to simulate the 'use' alias rewriting done in main.rs

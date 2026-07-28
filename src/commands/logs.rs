@@ -275,7 +275,7 @@ impl LogsCommand {
     }
 
     /// `aivo logs prune` — delete chat events in logs.db whose session file
-    /// has been removed. Confirms unless `-y`/`--yes` (alias `--force`) is set.
+    /// has been removed. Confirms unless `-y`/`--yes` is set.
     async fn prune_orphans(&self, args: &LogsArgs) -> Result<ExitCode> {
         let orphan_ids = compute_orphan_code_ids(&self.session_store).await;
         if orphan_ids.is_empty() {
@@ -292,7 +292,7 @@ impl LogsCommand {
             let prefix: String = id.chars().take(8).collect();
             println!("  {} {}", style::cyan(prefix), style::dim(id));
         }
-        if !args.force {
+        if !args.yes {
             print!("Delete the orphan logs.db rows for these sessions? [y/N] ");
             io::stdout().flush()?;
             let mut input = String::new();
@@ -2134,7 +2134,7 @@ mod tests {
             no_redact: false,
             open: false,
             debug_local_only: false,
-            force: false,
+            yes: false,
         }
     }
 
@@ -2364,7 +2364,7 @@ mod tests {
             no_redact: false,
             open: false,
             debug_local_only: false,
-            force: false,
+            yes: false,
         }
     }
 

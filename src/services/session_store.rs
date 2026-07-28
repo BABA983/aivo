@@ -1650,12 +1650,11 @@ impl SessionStore {
     pub async fn export_keys(
         &self,
         ids: Option<&[String]>,
-        include_oauth: bool,
     ) -> Result<(
         Vec<ApiKey>,
         crate::services::api_key_store::ExportFilterReport,
     )> {
-        self.api_keys.export_keys(ids, include_oauth).await
+        self.api_keys.export_keys(ids).await
     }
 
     /// See [`ApiKeyStore::import_keys`].

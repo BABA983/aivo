@@ -33,6 +33,8 @@ pub struct ImportReport {
     pub skipped: Vec<String>,
     /// Starter rows dropped from the incoming records (device-bound).
     pub skipped_starter: usize,
+    /// Login-session rows dropped — old export files may still carry them.
+    pub skipped_oauth: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -167,9 +169,16 @@ pub(crate) fn is_login_session_record(key: &ApiKey) -> bool {
     if crate::services::cursor_acp::is_cursor_acp_base(&key.base_url) {
         let mut probe = key.clone();
         return ApiKeyStore::decrypt_key_secret(&mut probe).is_ok()
-            && crate::services::cursor_acp::cursor_account_id(&probe).is_some();
+            && is_login_session_plaintext(&probe);
     }
     false
+}
+
+/// Same test for records whose secret is already plaintext (import payloads).
+pub(crate) fn is_login_session_plaintext(key: &ApiKey) -> bool {
+    crate::services::provider_profile::is_oauth_or_copilot_base(&key.base_url)
+        || (crate::services::cursor_acp::is_cursor_acp_base(&key.base_url)
+            && crate::services::cursor_acp::cursor_account_id(key).is_some())
 }
 
 impl ApiKeyStore {
@@ -210,13 +219,12 @@ impl ApiKeyStore {
 
     /// The starter key never exports — the real credential is the
     /// per-install device key (`secrets/device-key`), so the record is dead
-    /// weight elsewhere. Login sessions are filtered unless `include_oauth`.
+    /// weight elsewhere. Login sessions never export either (account-bound).
     /// `ids` match by full id, short id, or exact name; ambiguous names
     /// error.
     pub(crate) async fn export_keys(
         &self,
         ids: Option<&[String]>,
-        include_oauth: bool,
     ) -> Result<(Vec<ApiKey>, ExportFilterReport)> {
         use crate::services::provider_profile::is_aivo_starter_base;
 
@@ -260,11 +268,9 @@ impl ApiKeyStore {
         let before = selected.len();
         selected.retain(|k| !is_aivo_starter_base(&k.base_url));
         report.skipped_starter = before - selected.len();
-        if !include_oauth {
-            let before = selected.len();
-            selected.retain(|key| !is_login_session_record(key));
-            report.skipped_oauth = before - selected.len();
-        }
+        let before = selected.len();
+        selected.retain(|key| !is_login_session_record(key));
+        report.skipped_oauth = before - selected.len();
 
         for key in &mut selected {
             Self::decrypt_key_secret(key)?;
@@ -297,6 +303,11 @@ impl ApiKeyStore {
             // files may still contain them.
             if is_aivo_starter_base(&incoming.base_url) {
                 report.skipped_starter += 1;
+                continue;
+            }
+            // Old export files may still carry login rows.
+            if is_login_session_plaintext(&incoming) {
+                report.skipped_oauth += 1;
                 continue;
             }
             let source_id = incoming.id.clone();
@@ -1025,7 +1036,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (exported, _) = store.export_keys(None, true).await.unwrap();
+        let (exported, _) = store.export_keys(None).await.unwrap();
         assert_eq!(exported.len(), 2);
         for key in &exported {
             assert!(!is_encrypted(&key.key), "exported secret must be plaintext");
@@ -1049,14 +1060,14 @@ mod tests {
             .await
             .unwrap();
 
-        let (exported, report) = store.export_keys(None, true).await.unwrap();
+        let (exported, report) = store.export_keys(None).await.unwrap();
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].name, "alpha");
         assert_eq!(report.skipped_starter, 1);
 
         // Even an explicit --ids selection drops the starter row.
         let (by_id, report) = store
-            .export_keys(Some(&["aivo".to_string(), "alpha".to_string()]), true)
+            .export_keys(Some(&["aivo".to_string(), "alpha".to_string()]))
             .await
             .unwrap();
         assert_eq!(by_id.len(), 1);
@@ -1099,11 +1110,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_skips_oauth_and_copilot_by_default() {
+    async fn export_always_skips_login_sessions() {
         use crate::services::claude_oauth::CLAUDE_OAUTH_SENTINEL;
         use crate::services::codex_oauth::CODEX_OAUTH_SENTINEL;
         use crate::services::cursor_acp::{CURSOR_ACP_SENTINEL, CURSOR_SHADOW_PREFIX};
         use crate::services::gemini_oauth::GEMINI_OAUTH_SENTINEL;
+        use crate::services::grok_oauth::GROK_OAUTH_SENTINEL;
+        use crate::services::kimi_oauth::KIMI_OAUTH_SENTINEL;
 
         let temp_dir = TempDir::new().unwrap();
         let store = make_store(&temp_dir);
@@ -1125,6 +1138,14 @@ mod tests {
             .await
             .unwrap();
         store
+            .add_key_with_protocol("grok", GROK_OAUTH_SENTINEL, None, "{\"token\":\"t\"}")
+            .await
+            .unwrap();
+        store
+            .add_key_with_protocol("kimi", KIMI_OAUTH_SENTINEL, None, "{\"token\":\"t\"}")
+            .await
+            .unwrap();
+        store
             .add_key_with_protocol(
                 "cursor",
                 CURSOR_ACP_SENTINEL,
@@ -1138,13 +1159,69 @@ mod tests {
             .await
             .unwrap();
 
-        let (without, report) = store.export_keys(None, false).await.unwrap();
-        assert_eq!(without.len(), 1);
-        assert_eq!(without[0].name, "alpha");
-        assert_eq!(report.skipped_oauth, 5);
+        let (exported, report) = store.export_keys(None).await.unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].name, "alpha");
+        assert_eq!(report.skipped_oauth, 7);
 
-        let (with, _) = store.export_keys(None, true).await.unwrap();
-        assert_eq!(with.len(), 6);
+        let (by_id, report) = store
+            .export_keys(Some(&["claude".to_string()]))
+            .await
+            .unwrap();
+        assert!(by_id.is_empty());
+        assert_eq!(report.skipped_oauth, 1);
+    }
+
+    #[tokio::test]
+    async fn import_drops_login_session_rows() {
+        use crate::services::claude_oauth::CLAUDE_OAUTH_SENTINEL;
+        use crate::services::cursor_acp::{CURSOR_ACP_SENTINEL, CURSOR_SHADOW_PREFIX};
+        use crate::services::grok_oauth::GROK_OAUTH_SENTINEL;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = make_store(&temp_dir);
+
+        let records = vec![
+            ApiKey::new_with_protocol(
+                "aa1".into(),
+                "claude".into(),
+                CLAUDE_OAUTH_SENTINEL.into(),
+                None,
+                "{\"token\":\"t\"}".into(),
+            ),
+            ApiKey::new_with_protocol(
+                "aa2".into(),
+                "grok".into(),
+                GROK_OAUTH_SENTINEL.into(),
+                None,
+                "{\"token\":\"t\"}".into(),
+            ),
+            ApiKey::new_with_protocol(
+                "aa3".into(),
+                "cursor".into(),
+                CURSOR_ACP_SENTINEL.into(),
+                None,
+                format!("{CURSOR_SHADOW_PREFIX}testaccount1"),
+            ),
+            ApiKey::new_with_protocol(
+                "aa4".into(),
+                "alpha".into(),
+                "http://a".into(),
+                None,
+                "sk-alpha".into(),
+            ),
+        ];
+
+        let report = store
+            .import_keys(records, ImportPolicy::Skip)
+            .await
+            .unwrap();
+        assert_eq!(report.skipped_oauth, 3);
+        assert_eq!(report.imported.len(), 1);
+
+        let keys = store.get_keys().await.unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].name, "alpha");
     }
 
     #[tokio::test]
@@ -1159,7 +1236,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (without, report) = store.export_keys(None, false).await.unwrap();
+        let (without, report) = store.export_keys(None).await.unwrap();
         assert_eq!(without.len(), 1);
         assert_eq!(without[0].name, "cursor");
         assert_eq!(without[0].key.as_str(), "sk-cursor");
@@ -1181,14 +1258,14 @@ mod tests {
             .unwrap();
 
         let (only_a, _) = store
-            .export_keys(Some(std::slice::from_ref(&id_a)), true)
+            .export_keys(Some(std::slice::from_ref(&id_a)))
             .await
             .unwrap();
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].name, "alpha");
 
         let err = store
-            .export_keys(Some(&["does-not-exist".to_string()]), true)
+            .export_keys(Some(&["does-not-exist".to_string()]))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Unknown key id or name"));
@@ -1209,7 +1286,7 @@ mod tests {
             .unwrap();
 
         let (by_name, _) = store
-            .export_keys(Some(&["alpha".to_string()]), true)
+            .export_keys(Some(&["alpha".to_string()]))
             .await
             .unwrap();
         assert_eq!(by_name.len(), 1);
@@ -1217,7 +1294,7 @@ mod tests {
 
         // Same key selected by name and id exports once.
         let (deduped, _) = store
-            .export_keys(Some(&["alpha".to_string(), id_a.clone()]), true)
+            .export_keys(Some(&["alpha".to_string(), id_a.clone()]))
             .await
             .unwrap();
         assert_eq!(deduped.len(), 1);
@@ -1238,7 +1315,7 @@ mod tests {
             .unwrap();
 
         let err = store
-            .export_keys(Some(&["dup".to_string()]), true)
+            .export_keys(Some(&["dup".to_string()]))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ambiguous"));
@@ -1251,7 +1328,7 @@ mod tests {
         src.add_key_with_protocol("alpha", "http://a", None, "sk-alpha")
             .await
             .unwrap();
-        let (exported, _) = src.export_keys(None, true).await.unwrap();
+        let (exported, _) = src.export_keys(None).await.unwrap();
 
         let dst_dir = TempDir::new().unwrap();
         let dst = make_store(&dst_dir);
@@ -1339,7 +1416,7 @@ mod tests {
             .add_key_with_protocol("alpha", "http://a", None, "sk-alpha")
             .await
             .unwrap();
-        let (exported, _) = store.export_keys(None, true).await.unwrap();
+        let (exported, _) = store.export_keys(None).await.unwrap();
 
         let report = store
             .import_keys(exported, ImportPolicy::Skip)
@@ -1358,7 +1435,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut imported, _) = store.export_keys(None, true).await.unwrap();
+        let (mut imported, _) = store.export_keys(None).await.unwrap();
         imported[0].key = Zeroizing::new("sk-rotated".to_string());
 
         let report = store
@@ -1380,7 +1457,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (mut imported, _) = store.export_keys(None, true).await.unwrap();
+        let (mut imported, _) = store.export_keys(None).await.unwrap();
         imported[0].key = Zeroizing::new("sk-incoming".to_string());
 
         let report = store

@@ -381,16 +381,13 @@ enum ExportPick {
 }
 
 fn print_no_keys_to_export(skipped_oauth: usize, skipped_starter: usize) {
-    let hint = if skipped_oauth > 0 {
-        " (pass --include-oauth to include login sessions)"
-    } else {
-        ""
-    };
-    eprintln!(
-        "{} No keys to export.{}",
-        style::red("Error:"),
-        style::dim(hint)
-    );
+    eprintln!("{} No keys to export.", style::red("Error:"));
+    if skipped_oauth > 0 {
+        eprintln!(
+            "{}",
+            style::dim("Login sessions never export — sign in again on the target machine.")
+        );
+    }
     if skipped_starter > 0 {
         eprintln!(
             "{}",
@@ -438,7 +435,7 @@ fn default_export_filename() -> String {
 
 fn refuse_overwrite(path: &std::path::Path) -> anyhow::Error {
     anyhow::anyhow!(
-        "Refusing to overwrite existing file at {}. Pass --force to override.",
+        "Refusing to overwrite existing file at {}. Pass --yes to override.",
         path.display()
     )
 }
@@ -461,7 +458,7 @@ fn vet_export_target(path: &std::path::Path, force: bool) -> Result<bool> {
     if ft.is_symlink() {
         if !force {
             return Err(anyhow::anyhow!(
-                "Refusing to write through symlink at {}. Pass --force to override.",
+                "Refusing to write through symlink at {}. Pass --yes to override.",
                 path.display()
             ));
         }
@@ -1214,7 +1211,7 @@ impl KeysCommand {
             }
             None | Some("list" | "ls") => self.list_keys(keys_args.json).await,
             Some("add") => self.add_key(first, add_options).await,
-            Some("rm" | "remove") => self.remove_key(first).await,
+            Some("rm" | "remove") => self.remove_key(first, keys_args.yes).await,
             Some("use") => self.use_key(first).await,
             Some("cat") => self.cat_key(first).await,
             Some("edit") => self.edit_key(first).await,
@@ -1538,9 +1535,9 @@ impl KeysCommand {
         Ok(ExitCode::Success)
     }
 
-    /// Starter rows never appear (device-bound); login sessions start
-    /// unchecked — ticking one is the consent `--include-oauth` would give.
-    async fn prompt_pick_export_keys(&self, preselect_oauth: bool) -> Result<ExportPick> {
+    /// Starter rows never appear; login rows show disabled — hiding them
+    /// would read as a lost key.
+    async fn prompt_pick_export_keys(&self) -> Result<ExportPick> {
         use crate::services::provider_profile::is_aivo_starter_base;
 
         // Metadata-only load — the picker never needs decrypted secrets.
@@ -1550,32 +1547,31 @@ impl KeysCommand {
             println!("  {}", crate::commands::add_key_cta());
             return Ok(ExportPick::Stop(ExitCode::UserError));
         }
-        let total = keys.len();
+        let mut skipped_starter = 0usize;
         let mut choices: Vec<ApiKey> = Vec::new();
         let mut items: Vec<String> = Vec::new();
-        let mut notes: Vec<Option<String>> = Vec::new();
-        let mut checked: Vec<bool> = Vec::new();
+        let mut annotations: Vec<Option<String>> = Vec::new();
         for key in keys {
             if is_aivo_starter_base(&key.base_url) {
+                skipped_starter += 1;
                 continue;
             }
             let login = crate::services::api_key_store::is_login_session_record(&key);
             items.push(format_key_choice(&key));
-            notes.push(login.then(|| "login session".to_string()));
-            checked.push(!login || preselect_oauth);
+            annotations.push(login.then(|| "login session — never exports".to_string()));
             choices.push(key);
         }
-        if choices.is_empty() {
-            // Only starter keys existed.
-            print_no_keys_to_export(0, total);
+        let selectable = annotations.iter().filter(|a| a.is_none()).count();
+        if selectable == 0 {
+            print_no_keys_to_export(choices.len(), skipped_starter);
             return Ok(ExportPick::Stop(ExitCode::UserError));
         }
 
         match MultiSelect::new()
             .with_prompt("Select keys to export")
             .items(&items)
-            .notes(notes)
-            .checked(&checked)
+            .checked(&vec![true; items.len()])
+            .annotations(annotations)
             .interact_opt()?
         {
             None => {
@@ -1595,7 +1591,7 @@ impl KeysCommand {
                         .collect::<Vec<_>>()
                         .join(", ")
                 } else {
-                    format!("{} of {} selected", picked.len(), choices.len())
+                    format!("{} of {} selected", picked.len(), selectable)
                 };
                 println!("{} {}", style::dim("Keys:"), style::cyan(echo));
                 Ok(ExportPick::Keys(
@@ -1610,6 +1606,13 @@ impl KeysCommand {
         file_arg: Option<&str>,
         keys_args: &KeysArgs,
     ) -> Result<ExitCode> {
+        if keys_args.include_oauth {
+            eprintln!(
+                "{} --include-oauth was removed — login sessions never export. Sign in again on the target machine.",
+                style::red("Error:")
+            );
+            return Ok(ExitCode::UserError);
+        }
         // `--password-stdin` reserves stdin for the password, so no prompting then.
         let interactive = !keys_args.password_stdin && crate::tui::prompt_interactive();
 
@@ -1624,12 +1627,9 @@ impl KeysCommand {
                 1,
                 total_steps,
                 "Select keys",
-                "space toggles, enter confirms",
+                "type to filter, space toggles, enter confirms",
             );
-            match self
-                .prompt_pick_export_keys(keys_args.include_oauth)
-                .await?
-            {
+            match self.prompt_pick_export_keys().await? {
                 ExportPick::Keys(ids) => Some(ids),
                 ExportPick::Stop(code) => return Ok(code),
             }
@@ -1640,15 +1640,9 @@ impl KeysCommand {
         let id_filter: Option<&[String]> = picked_ids
             .as_deref()
             .or((!keys_args.ids.is_empty()).then_some(keys_args.ids.as_slice()));
-        // Ticking a login row is consent; `--ids` deliberately still
-        // requires --include-oauth so scripts never ship logins by accident.
-        let include_oauth = keys_args.include_oauth || picked_ids.is_some();
 
         // Fail on an empty selection or bad --ids before any prompt.
-        let (records, filter_report) = self
-            .session_store
-            .export_keys(id_filter, include_oauth)
-            .await?;
+        let (records, filter_report) = self.session_store.export_keys(id_filter).await?;
         if records.is_empty() {
             print_no_keys_to_export(filter_report.skipped_oauth, filter_report.skipped_starter);
             return Ok(ExitCode::UserError);
@@ -1674,11 +1668,10 @@ impl KeysCommand {
         }
         if filter_report.skipped_oauth > 0 {
             println!(
-                "{} Skipped {} OAuth/Copilot/Cursor login session{} — pass {} to include.",
+                "{} Skipped {} login session{} — they never export; sign in again on the target machine.",
                 style::dim("·"),
                 filter_report.skipped_oauth,
                 plural(filter_report.skipped_oauth),
-                style::cyan("--include-oauth")
             );
         }
 
@@ -1706,7 +1699,7 @@ impl KeysCommand {
         };
 
         // Vet the target before the user types a password twice.
-        let mut force = keys_args.force;
+        let mut force = keys_args.yes;
         if vet_export_target(&file, force)? && !force {
             if !interactive {
                 return Err(refuse_overwrite(&file));
@@ -1847,6 +1840,14 @@ impl KeysCommand {
                 "{dot} {}",
                 style::dim(
                     "Skipped the export's aivo-starter key — it only works on its original machine."
+                )
+            );
+        }
+        if report.skipped_oauth > 0 {
+            println!(
+                "{dot} {}",
+                style::dim(
+                    "Skipped the export's login sessions — sign in on this machine instead."
                 )
             );
         }
@@ -3467,7 +3468,7 @@ impl KeysCommand {
     }
 
     /// Removes an API key by ID or name
-    async fn remove_key(&self, key_id_or_name: Option<&str>) -> Result<ExitCode> {
+    async fn remove_key(&self, key_id_or_name: Option<&str>, yes: bool) -> Result<ExitCode> {
         let key_to_remove = match self
             .resolve_key_selection(
                 key_id_or_name,
@@ -3490,7 +3491,7 @@ impl KeysCommand {
         println!("URL: {}", style::dim(&key_to_remove.base_url));
         println!();
 
-        let confirmed = confirm(&format!("Remove \"{}\"?", key_to_remove.display_name()))?;
+        let confirmed = yes || confirm(&format!("Remove \"{}\"?", key_to_remove.display_name()))?;
 
         if !confirmed {
             println!("{}", style::dim("Cancelled."));
@@ -3724,6 +3725,9 @@ fn print_help_rm() {
         style::dim("Remove an API key. Bare `aivo keys rm` opens the picker.")
     );
     println!();
+    println!("{}", style::bold("Flags:"));
+    keys_help_row("-y, --yes", "Skip the confirmation prompt");
+    println!();
     println!("{}", style::bold("Examples:"));
     println!("  {}", style::dim("aivo keys rm"));
     println!("  {}", style::dim("aivo keys rm openrouter"));
@@ -3820,11 +3824,7 @@ fn print_help_export() {
     println!("{}", style::bold("Flags:"));
     keys_help_row("--ids <a,b,c>", "Export only the given keys (ids or names)");
     keys_help_row("--password-stdin", "Read password from stdin (no prompt)");
-    keys_help_row(
-        "--include-oauth",
-        "Include OAuth/Copilot/Cursor login sessions",
-    );
-    keys_help_row("--force", "Overwrite an existing file");
+    keys_help_row("-y, --yes", "Overwrite an existing file without asking");
     println!();
     println!("{}", style::bold("Examples:"));
     println!("  {}", style::dim("aivo keys export"));
@@ -3834,7 +3834,7 @@ fn print_help_export() {
     );
     println!(
         "  {}",
-        style::dim("printf '%s' \"$PW\" | aivo keys export keys.aivo --password-stdin --force")
+        style::dim("printf '%s' \"$PW\" | aivo keys export keys.aivo --password-stdin -y")
     );
 }
 
@@ -4048,7 +4048,7 @@ mod tests {
             overwrite: false,
             rename: false,
             include_oauth: false,
-            force: false,
+            yes: false,
         }
     }
 
@@ -4116,6 +4116,24 @@ mod tests {
         let cmd = KeysCommand::new(store);
         let code = cmd.execute(keys_args(Some("rm"), &[])).await;
         assert_eq!(code, crate::errors::ExitCode::Success);
+    }
+
+    #[tokio::test]
+    async fn test_remove_key_yes_skips_confirmation() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let store = crate::services::session_store::SessionStore::with_path(config_path);
+        store
+            .add_key_with_protocol("doomed", "https://api.example.com", None, "sk-1")
+            .await
+            .unwrap();
+        let cmd = KeysCommand::new(store.clone());
+
+        let mut args = keys_args(Some("rm"), &["doomed"]);
+        args.yes = true;
+        let code = cmd.execute(args).await;
+        assert_eq!(code, crate::errors::ExitCode::Success);
+        assert!(store.get_keys().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4265,7 +4283,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 
@@ -4304,7 +4322,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 
@@ -4355,7 +4373,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 
@@ -4384,7 +4402,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 
@@ -4406,7 +4424,7 @@ mod tests {
             overwrite: false,
             rename: false,
             include_oauth: false,
-            force: false,
+            yes: false,
         }
     }
 
@@ -4473,7 +4491,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 
@@ -4502,7 +4520,7 @@ mod tests {
                 overwrite: false,
                 rename: false,
                 include_oauth: false,
-                force: false,
+                yes: false,
             })
             .await;
 

@@ -278,15 +278,13 @@ impl FuzzySelect {
     }
 }
 
-/// Checklist picker: space toggles, `a` toggles all, Enter confirms,
-/// Esc/Ctrl-C cancels. No fuzzy filter — meant for short lists.
+/// Checklist picker: typing filters, space toggles, `^a` toggles the visible
+/// rows, Enter confirms the full checked set, Esc/Ctrl-C cancels.
 pub struct MultiSelect {
     prompt: String,
     items: Vec<String>,
     checked: Vec<bool>,
-    /// Dim `(note)` suffix — unlike `FuzzySelect::annotations`, it does not
-    /// disable the row.
-    notes: Vec<Option<String>>,
+    annotations: Vec<Option<String>>,
 }
 
 impl Default for MultiSelect {
@@ -301,7 +299,7 @@ impl MultiSelect {
             prompt: "Select".to_string(),
             items: Vec::new(),
             checked: Vec::new(),
-            notes: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 
@@ -321,13 +319,18 @@ impl MultiSelect {
         self
     }
 
-    pub fn notes(mut self, notes: Vec<Option<String>>) -> Self {
-        self.notes = notes;
+    /// `Some(reason)` disables the item and shows the reason as a dim suffix.
+    pub fn annotations(mut self, annotations: Vec<Option<String>>) -> Self {
+        self.annotations = annotations;
         self
     }
 
-    fn note(&self, idx: usize) -> Option<&str> {
-        self.notes.get(idx).and_then(Option::as_deref)
+    fn annotation(&self, idx: usize) -> Option<&str> {
+        self.annotations.get(idx).and_then(Option::as_deref)
+    }
+
+    fn is_disabled(&self, idx: usize) -> bool {
+        self.annotation(idx).is_some()
     }
 
     /// Checked indices on Enter (possibly empty), `None` on cancel.
@@ -337,36 +340,66 @@ impl MultiSelect {
             return Ok(Some(Vec::new()));
         }
         self.checked.resize(count, false);
+        let disabled: Vec<bool> = (0..count).map(|i| self.is_disabled(i)).collect();
+        for (c, &d) in self.checked.iter_mut().zip(&disabled) {
+            if d {
+                *c = false;
+            }
+        }
+        let selectable = disabled.iter().filter(|&&d| !d).count();
 
         let term = Term::stderr();
         let _raw_mode = RawModeGuard::enable()?;
         let _cursor = CursorGuard::hide(&term)?;
+        let _paste_mode = BracketedPasteGuard::enable().ok();
 
+        let mut query = String::new();
         let mut cursor = 0usize;
         let mut page_start = 0usize;
         let page_size = 10;
 
         loop {
+            let filter_query = query_for_filter(&query);
+            let mut filtered: Vec<usize> = (0..count)
+                .filter(|&i| matches_fuzzy(filter_query, &self.items[i]))
+                .collect();
+            if !filter_query.is_empty() {
+                filtered.sort_by_cached_key(|&i| score_match(filter_query, &self.items[i]));
+            }
+            let view_count = filtered.len();
+
+            if cursor >= view_count {
+                cursor = view_count.saturating_sub(1);
+            }
             if cursor < page_start {
                 page_start = cursor;
             } else if cursor >= page_start + page_size {
                 page_start = cursor + 1 - page_size;
             }
-            let end_idx = (page_start + page_size).min(count);
+            if page_start > view_count.saturating_sub(1) {
+                page_start = view_count.saturating_sub(1);
+            }
+            let end_idx = (page_start + page_size).min(view_count);
 
             let term_width = term.size().1 as usize;
             let n_checked = self.checked.iter().filter(|&&c| c).count();
-            let prompt_line = format!(
-                "{} {}",
-                crate::style::bold(format!("{}:", self.prompt)),
-                crate::style::dim(format!(
-                    "{n_checked}/{count} · space toggle · a all · enter confirm"
-                ))
-            );
+            let hint = crate::style::dim(format!(
+                "{n_checked}/{selectable} · space toggle · ^a all · enter confirm"
+            ));
+            let bold_prompt = crate::style::bold(format!("{}:", self.prompt));
+            let prompt_line = if query.is_empty() {
+                format!("{bold_prompt} {hint}")
+            } else {
+                format!("{bold_prompt} {query} {hint}")
+            };
             term.write_line(&truncate_to_width(&prompt_line, term_width))?;
 
             // Includes the prompt row — must match the clears below.
             let mut lines_drawn = 1;
+            if view_count == 0 {
+                term.write_line(&format!("  {}", crate::style::dim("(no matches)")))?;
+                lines_drawn += 1;
+            }
             if page_start > 0 {
                 term.write_line(&format!(
                     "  {}",
@@ -374,17 +407,18 @@ impl MultiSelect {
                 ))?;
                 lines_drawn += 1;
             }
-            for i in page_start..end_idx {
-                let is_cursor = i == cursor;
+            for (vi, &i) in filtered.iter().enumerate().take(end_idx).skip(page_start) {
+                let is_cursor = vi == cursor;
                 let symbol = if is_cursor {
                     crate::style::cyan(">")
                 } else {
                     " ".to_string()
                 };
+                // ●/○ = the keys-list state-dot family; ✓ has emoji variants.
                 let mark = if self.checked[i] {
-                    crate::style::cyan("[x]")
+                    crate::style::cyan("●")
                 } else {
-                    crate::style::dim("[ ]")
+                    crate::style::dim("○")
                 };
                 // Strip baked-in ANSI so the muting gray applies uniformly.
                 let styled_item = if !self.checked[i] {
@@ -395,17 +429,17 @@ impl MultiSelect {
                     self.items[i].clone()
                 };
                 let suffix = self
-                    .note(i)
-                    .map(|note| format!("  {}", crate::style::dim(format!("({note})"))))
+                    .annotation(i)
+                    .map(|reason| format!("  {}", crate::style::dim(format!("({reason})"))))
                     .unwrap_or_default();
                 let line = format!("{} {} {}{}", symbol, mark, styled_item, suffix);
                 term.write_line(&truncate_to_width(&line, term_width))?;
                 lines_drawn += 1;
             }
-            if end_idx < count {
+            if end_idx < view_count {
                 term.write_line(&format!(
                     "  {}",
-                    crate::style::dim(format!("↓ {} more below", count - end_idx))
+                    crate::style::dim(format!("↓ {} more below", view_count - end_idx))
                 ))?;
                 lines_drawn += 1;
             }
@@ -421,11 +455,15 @@ impl MultiSelect {
             term.clear_last_lines(lines_drawn)?;
 
             match input {
-                FuzzyInput::Previous => {
-                    cursor = if cursor == 0 { count - 1 } else { cursor - 1 };
+                FuzzyInput::Previous if view_count > 0 => {
+                    cursor = if cursor == 0 {
+                        view_count - 1
+                    } else {
+                        cursor - 1
+                    };
                 }
-                FuzzyInput::Next => {
-                    cursor = (cursor + 1) % count;
+                FuzzyInput::Next if view_count > 0 => {
+                    cursor = (cursor + 1) % view_count;
                 }
                 FuzzyInput::Enter => {
                     let picked = (0..count).filter(|&i| self.checked[i]).collect();
@@ -434,12 +472,24 @@ impl MultiSelect {
                 FuzzyInput::Cancel => {
                     return Ok(None);
                 }
-                FuzzyInput::Text(t) if t == " " => {
-                    self.checked[cursor] = !self.checked[cursor];
+                FuzzyInput::Backspace if !query.is_empty() => {
+                    query.pop();
+                    cursor = 0;
+                    page_start = 0;
                 }
-                FuzzyInput::Text(t) if t.eq_ignore_ascii_case("a") => {
-                    let target = toggle_all_target(&self.checked);
-                    self.checked.iter_mut().for_each(|c| *c = target);
+                FuzzyInput::ToggleAll => {
+                    toggle_all_enabled(&mut self.checked, &disabled, &filtered);
+                }
+                FuzzyInput::Text(t) if t == " " => {
+                    if view_count > 0 && !disabled[filtered[cursor]] {
+                        let i = filtered[cursor];
+                        self.checked[i] = !self.checked[i];
+                    }
+                }
+                FuzzyInput::Text(t) if !t.is_empty() => {
+                    query.push_str(&t);
+                    cursor = 0;
+                    page_start = 0;
                 }
                 _ => {}
             }
@@ -447,9 +497,14 @@ impl MultiSelect {
     }
 }
 
-/// `a`: check everything unless already all checked, then uncheck all.
-fn toggle_all_target(checked: &[bool]) -> bool {
-    checked.iter().any(|&c| !c)
+/// `^a`: all-or-none over the enabled rows of `view`; rows outside stay put.
+fn toggle_all_enabled(checked: &mut [bool], disabled: &[bool], view: &[usize]) {
+    let target = view.iter().any(|&i| !disabled[i] && !checked[i]);
+    for &i in view {
+        if !disabled[i] {
+            checked[i] = target;
+        }
+    }
 }
 
 /// Restores the cursor on scope exit — early `?` returns must not leave it
@@ -553,6 +608,8 @@ enum FuzzyInput {
     Enter,
     Cancel,
     Backspace,
+    /// Ctrl+A — `MultiSelect` toggle-all; `FuzzySelect` ignores it.
+    ToggleAll,
     Text(String),
     Ignore,
 }
@@ -580,6 +637,9 @@ fn read_fuzzy_input() -> std::io::Result<FuzzyInput> {
                     KeyCode::Esc => FuzzyInput::Cancel,
                     KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                         FuzzyInput::Cancel
+                    }
+                    KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        FuzzyInput::ToggleAll
                     }
                     KeyCode::Backspace => FuzzyInput::Backspace,
                     KeyCode::Char(c) if !c.is_control() => FuzzyInput::Text(c.to_string()),
@@ -691,16 +751,45 @@ pub(crate) fn matches_fuzzy(query: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        matches_fuzzy, normalize_pasted_query, query_for_filter, score_match, toggle_all_target,
+        matches_fuzzy, normalize_pasted_query, query_for_filter, score_match, toggle_all_enabled,
         truncate_to_width,
     };
 
     #[test]
-    fn toggle_all_checks_everything_until_all_checked() {
-        assert!(toggle_all_target(&[false, false]));
-        assert!(toggle_all_target(&[true, false]));
-        assert!(!toggle_all_target(&[true, true]));
-        assert!(!toggle_all_target(&[]));
+    fn toggle_all_checks_every_enabled_row_until_all_checked() {
+        let view = [0usize, 1];
+        let mut checked = [false, false];
+        toggle_all_enabled(&mut checked, &[false, false], &view);
+        assert_eq!(checked, [true, true]);
+        toggle_all_enabled(&mut checked, &[false, false], &view);
+        assert_eq!(checked, [false, false]);
+
+        let mut checked = [true, false];
+        toggle_all_enabled(&mut checked, &[false, false], &view);
+        assert_eq!(checked, [true, true]);
+
+        toggle_all_enabled(&mut [], &[], &[]);
+    }
+
+    #[test]
+    fn toggle_all_ignores_disabled_rows() {
+        // Disabled rows neither flip nor count toward "all checked".
+        let view = [0usize, 1, 2];
+        let mut checked = [true, false, false];
+        toggle_all_enabled(&mut checked, &[false, true, false], &view);
+        assert_eq!(checked, [true, false, true]);
+        toggle_all_enabled(&mut checked, &[false, true, false], &view);
+        assert_eq!(checked, [false, false, false]);
+    }
+
+    #[test]
+    fn toggle_all_only_touches_the_filtered_view() {
+        // Row 0 is outside the view: never flips, never counts.
+        let mut checked = [true, false, false];
+        toggle_all_enabled(&mut checked, &[false; 3], &[1, 2]);
+        assert_eq!(checked, [true, true, true]);
+        toggle_all_enabled(&mut checked, &[false; 3], &[1, 2]);
+        assert_eq!(checked, [true, false, false]);
     }
 
     #[test]

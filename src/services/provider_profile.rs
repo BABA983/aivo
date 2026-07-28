@@ -146,6 +146,8 @@ pub fn is_oauth_or_copilot_base(base_url: &str) -> bool {
         || base_url == crate::services::claude_oauth::CLAUDE_OAUTH_SENTINEL
         || base_url == crate::services::codex_oauth::CODEX_OAUTH_SENTINEL
         || base_url == crate::services::gemini_oauth::GEMINI_OAUTH_SENTINEL
+        || base_url == crate::services::grok_oauth::GROK_OAUTH_SENTINEL
+        || base_url == crate::services::kimi_oauth::KIMI_OAUTH_SENTINEL
 }
 
 /// Resolves the aivo-starter sentinel to the real API URL.

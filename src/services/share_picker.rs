@@ -125,7 +125,7 @@ fn build_logs_args(project_root: &Path, all: bool) -> LogsArgs {
         no_redact: false,
         open: false,
         debug_local_only: false,
-        force: false,
+        yes: false,
     }
 }
 
