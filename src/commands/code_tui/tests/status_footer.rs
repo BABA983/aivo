@@ -306,7 +306,8 @@ fn test_footer_groups_workspace_left_engine_right() {
         .collect();
     // Workspace cluster left: where the agent acts, then the session handle.
     assert!(
-        row.starts_with("/tmp/project (main) · #abcdef12"),
+        row.trim_start()
+            .starts_with("/tmp/project (main) · #abcdef12"),
         "footer: {row:?}"
     );
     // Engine cluster right: model · key, with the meter holding the corner.

@@ -3233,9 +3233,10 @@ impl CodeTuiApp {
     }
 
     pub(super) fn render_footer(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        // One column of right inset mirrors APP_LEFT_MARGIN on the far side.
+        // One column of inset on each side so the row's padding reads symmetric.
         let area = Rect {
-            width: area.width.saturating_sub(1),
+            x: area.x.saturating_add(1),
+            width: area.width.saturating_sub(2),
             ..area
         };
         // Cleared so a frame that omits the id/badge leaves no stale click
