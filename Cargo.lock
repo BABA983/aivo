@@ -79,6 +79,7 @@ dependencies = [
  "landlock",
  "libc",
  "minisign-verify",
+ "miniz_oxide",
  "pbkdf2",
  "png",
  "portable-pty",
@@ -100,6 +101,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "zeroize",
  "zune-core",
+ "zune-inflate",
  "zune-jpeg",
  "zune-png",
 ]

@@ -16,7 +16,7 @@ pub struct KnownProvider {
 /// All known providers, ordered so that more specific ids come first
 /// (e.g. "openrouter" before "openai") to avoid substring false-positives.
 static KNOWN_PROVIDERS: LazyLock<Vec<KnownProvider>> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("../data/providers.json"))
+    serde_json::from_str(crate::services::embedded_assets::providers_json())
         .expect("embedded providers.json must be valid")
 });
 

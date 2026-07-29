@@ -112,8 +112,9 @@ fn build_snapshot() -> HashMap<String, ModelLimits> {
 }
 
 fn embedded_rows() -> std::collections::BTreeMap<String, LimitRow> {
-    let parsed: SnapshotFile = serde_json::from_str(include_str!("../data/model_limits.json"))
-        .expect("embedded model_limits.json is valid");
+    let parsed: SnapshotFile =
+        serde_json::from_str(crate::services::embedded_assets::model_limits_json())
+            .expect("embedded model_limits.json is valid");
     parsed.models
 }
 

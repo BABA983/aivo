@@ -62,8 +62,10 @@ pub fn discover_skills(cwd: &Path) -> Vec<Skill> {
 /// embedded `SKILL.md` so the name/body live in one editable place; `dir` is
 /// empty because there is nothing on disk.
 pub fn create_skill_builtin() -> Skill {
-    const SRC: &str = include_str!("builtin_skills/create-skill.md");
-    builtin_skill_from(SRC, "create-skill")
+    builtin_skill_from(
+        crate::services::embedded_assets::create_skill_md(),
+        "create-skill",
+    )
 }
 
 /// Name of the create-agent builtin — used to dedup against discovered skills
@@ -77,8 +79,10 @@ pub const CREATE_AGENT_SKILL_NAME: &str = "create-agent";
 /// so the model reaches for it through the `skill` tool. It has no folder and
 /// never appears in `/skills`.
 pub fn create_agent_builtin() -> Skill {
-    const SRC: &str = include_str!("builtin_skills/create-agent.md");
-    builtin_skill_from(SRC, CREATE_AGENT_SKILL_NAME)
+    builtin_skill_from(
+        crate::services::embedded_assets::create_agent_md(),
+        CREATE_AGENT_SKILL_NAME,
+    )
 }
 
 /// The skill list an engine advertises: discovered skills minus the

@@ -66,11 +66,11 @@ impl Subagent {
 /// Lowest precedence — any same-named repo/user file replaces them.
 pub fn builtin_subagents() -> Vec<Subagent> {
     [
-        include_str!("builtin_agents/explorer.md"),
-        include_str!("builtin_agents/aivo-guide.md"),
-        include_str!("builtin_agents/verification.md"),
-        include_str!("builtin_agents/advisor.md"),
-        include_str!("builtin_agents/evaluate.md"),
+        crate::services::embedded_assets::agent_explorer_md(),
+        crate::services::embedded_assets::agent_aivo_guide_md(),
+        crate::services::embedded_assets::agent_verification_md(),
+        crate::services::embedded_assets::agent_advisor_md(),
+        crate::services::embedded_assets::agent_evaluate_md(),
     ]
     .iter()
     .filter_map(|src| parse_subagent(src, String::new(), PathBuf::new()))

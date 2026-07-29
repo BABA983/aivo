@@ -39,9 +39,10 @@ pub mod cursor_home_shadow;
 pub mod device_auth;
 pub mod device_fingerprint;
 pub mod device_login_ui;
-#[cfg(target_env = "musl")]
+#[cfg(all(target_env = "musl", target_arch = "aarch64"))]
 pub mod dns_resolver;
 pub mod effort;
+pub mod embedded_assets;
 pub mod environment_injector;
 pub mod export_crypto;
 pub mod fake_model;
