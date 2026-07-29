@@ -9,9 +9,9 @@
 use anyhow::{Context, Result};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::constants::CONTENT_TYPE_JSON;
 use crate::services::device_fingerprint;
@@ -1127,6 +1127,7 @@ fn prepare_gateway_model_metadata(
         None,
         protocol,
     );
+    warn_on_model_substitution(&requested_model, &selected_model);
     simplified["model"] = Value::String(selected_model);
 
     if is_gateway_style_endpoint(&config.target_base_url)
@@ -1136,6 +1137,36 @@ fn prepare_gateway_model_metadata(
     {
         passthrough_headers.insert("x-provider", value);
     }
+}
+
+/// Surface a cross-vendor model swap once per pair — substitution is legitimate
+/// for single-vendor upstreams, but must never be silent.
+fn warn_on_model_substitution(requested: &str, selected: &str) {
+    if requested.is_empty() || requested == selected {
+        return;
+    }
+    // Snapping a name to its catalog id is the same model; only vendor changes matter.
+    let (Some(from), Some(to)) = (
+        infer_provider_name_from_model(requested),
+        infer_provider_name_from_model(selected),
+    ) else {
+        return;
+    };
+    if from == to {
+        return;
+    }
+
+    static SEEN: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let Ok(mut seen) = seen.lock() else {
+        return;
+    };
+    if !seen.insert((requested.to_string(), selected.to_string())) {
+        return;
+    }
+    eprintln!(
+        "  • Upstream can't serve '{requested}' over this protocol — sending '{selected}' instead"
+    );
 }
 
 fn cap_max_tokens_field(body: &mut Value, cap: Option<u64>) {

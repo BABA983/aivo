@@ -197,6 +197,9 @@ pub fn infer_provider_name_from_model(model: &str) -> Option<String> {
     }
 }
 
+/// True when a cross-protocol model must be forwarded verbatim: a multi-vendor
+/// gateway routes on the model name, so the wire protocol we speak to it says
+/// nothing about which vendors it serves.
 pub fn should_preserve_cross_protocol_model(
     base_url: &str,
     model: &str,
@@ -205,8 +208,7 @@ pub fn should_preserve_cross_protocol_model(
     match infer_model_protocol(model) {
         Some(protocol) if model_family(protocol) != model_family(target_protocol) => {
             // The starter is a multi-vendor gateway but its URL misses the name heuristic.
-            model_family(target_protocol) == ProviderProtocol::Openai
-                && (is_gateway_style_endpoint(base_url) || is_aivo_starter_base(base_url))
+            is_gateway_style_endpoint(base_url) || is_aivo_starter_base(base_url)
         }
         _ => false,
     }
@@ -654,6 +656,25 @@ mod tests {
     }
 
     #[test]
+    fn test_should_preserve_cross_protocol_model_for_non_openai_targets() {
+        assert!(should_preserve_cross_protocol_model(
+            "https://api.ai.example-gateway.net/endpoint",
+            "anthropic/claude-sonnet-4.5",
+            ProviderProtocol::Google
+        ));
+        assert!(should_preserve_cross_protocol_model(
+            "https://api.ai.example-gateway.net/endpoint",
+            "google/gemini-2.5-pro",
+            ProviderProtocol::Anthropic
+        ));
+        assert!(should_preserve_cross_protocol_model(
+            crate::constants::AIVO_STARTER_REAL_URL,
+            "anthropic/claude-opus-5",
+            ProviderProtocol::Google
+        ));
+    }
+
+    #[test]
     fn test_should_not_preserve_cross_protocol_model_for_plain_openai_endpoint() {
         assert!(!should_preserve_cross_protocol_model(
             "https://api.openai.com/v1",
@@ -712,6 +733,36 @@ mod tests {
                 ProviderProtocol::Openai
             ),
             "gpt-4o"
+        );
+    }
+
+    #[test]
+    fn test_select_model_for_provider_attempt_keeps_claude_on_google_route() {
+        // Regression: a learned Google route used to swap an explicit Claude
+        // selection for gemini-2.5-pro.
+        assert_eq!(
+            select_model_for_provider_attempt(
+                None,
+                "https://api.gapnet.ai/endpoint",
+                Some("anthropic/claude-sonnet-4.5"),
+                None,
+                ProviderProtocol::Google
+            ),
+            "anthropic/claude-sonnet-4.5"
+        );
+    }
+
+    #[test]
+    fn test_select_model_for_provider_attempt_still_remaps_single_vendor_google_endpoint() {
+        assert_eq!(
+            select_model_for_provider_attempt(
+                None,
+                "https://generativelanguage.googleapis.com/v1beta",
+                Some("anthropic/claude-sonnet-4.5"),
+                None,
+                ProviderProtocol::Google
+            ),
+            "gemini-2.5-pro"
         );
     }
 
