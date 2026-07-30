@@ -1050,14 +1050,13 @@ pub(super) fn render_pending_status(
 /// Row-name cap — short enough that the delegate's action stays visible.
 const SUBAGENT_ROW_NAME_MAX_COLS: usize = 28;
 
-/// One live tail row, truncated so a long line can't re-wrap taller each frame.
-pub(super) fn tool_tail_row_text(line: &str) -> String {
-    const TOOL_TAIL_MAX_COLS: usize = 96;
+pub(super) const TOOL_TAIL_MAX_COLS: usize = 96;
+pub(super) const TOOL_TAIL_INDENT_COLS: usize = 4;
+
+/// One tail row, truncated to `max_cols` so it can't wrap taller than one row.
+pub(super) fn tool_tail_row_text(line: &str, max_cols: usize) -> String {
     let line = line.replace('\t', "  ");
-    format!(
-        "    {}",
-        truncate_label(line.trim_end(), TOOL_TAIL_MAX_COLS)
-    )
+    format!("    {}", truncate_label(line.trim_end(), max_cols.max(8)))
 }
 
 /// One live row for a parallel delegate: `↳ name — action · step N (12s)`,
@@ -1910,7 +1909,7 @@ pub(super) fn render_tool_result(
             for line in result.lines().skip(count.saturating_sub(STREAM_TAIL_LINES)) {
                 let is_exit_line = line.trim().starts_with("[exit ");
                 lines.push(line_with_plain(vec![Span::styled(
-                    tool_tail_row_text(&strip_ansi_and_controls(line)),
+                    tool_tail_row_text(&strip_ansi_and_controls(line), TOOL_TAIL_MAX_COLS),
                     Style::default().fg(if is_exit_line { ERROR() } else { FAINT() }),
                 )]));
             }

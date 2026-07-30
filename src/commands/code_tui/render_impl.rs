@@ -866,7 +866,7 @@ impl CodeTuiApp {
             lines.push(row);
             bars.push(None);
         }
-        for row in self.tool_output_tail_rows() {
+        for row in self.tool_output_tail_rows(self.transcript_width) {
             lines.push(row);
             bars.push(None);
         }
@@ -913,25 +913,28 @@ impl CodeTuiApp {
     }
 
     /// Live `run_bash` tail rows under the spinner; empty when idle so an
-    /// interrupted turn can't leave ghost output.
-    fn tool_output_tail_rows(&self) -> Vec<StyledLine> {
+    /// interrupted turn can't leave ghost output. The view is bottom-pinned
+    /// while streaming, so the block height must stay frame-stable: completed
+    /// lines and the in-flight partial share one window, and each row is
+    /// clamped to the live width so it never wraps.
+    fn tool_output_tail_rows(&self, text_width: u16) -> Vec<StyledLine> {
         if !self.sending {
             return Vec::new();
         }
         let style = Style::default().fg(MUTED());
-        let mut rows: Vec<StyledLine> = self
-            .tool_output_tail
-            .iter()
-            .map(|line| line_plain(super::render::tool_tail_row_text(line), style))
-            .collect();
+        let max_cols = usize::from(text_width)
+            .saturating_sub(super::render::TOOL_TAIL_INDENT_COLS)
+            .min(super::render::TOOL_TAIL_MAX_COLS);
         let partial = self.tool_output_partial.trim_end();
+        let mut rows: Vec<&str> = self.tool_output_tail.iter().map(String::as_str).collect();
         if !partial.trim().is_empty() {
-            rows.push(line_plain(
-                super::render::tool_tail_row_text(partial),
-                style,
-            ));
+            rows.push(partial);
         }
-        rows
+        let skip = rows.len().saturating_sub(super::render::STREAM_TAIL_LINES);
+        rows.into_iter()
+            .skip(skip)
+            .map(|line| line_plain(super::render::tool_tail_row_text(line, max_cols), style))
+            .collect()
     }
 
     /// A cheap O(1) fingerprint of everything the cached *history body* depends
@@ -1255,7 +1258,7 @@ impl CodeTuiApp {
             tail.push(row);
             tail_bars.push(None);
         }
-        for row in self.tool_output_tail_rows() {
+        for row in self.tool_output_tail_rows(text_width) {
             tail.push(row);
             tail_bars.push(None);
         }

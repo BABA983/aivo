@@ -168,3 +168,49 @@ fn shrunken_reply_resets_settled_sections() {
     let composed = composed_rows(&mut app, &mut terminal);
     assert_eq!(composed, reference_rows(&app));
 }
+
+/// The live `run_bash` tail must never shrink the transcript mid-stream —
+/// the bottom-pinned view would bob as lines complete or long rows rotate out.
+#[test]
+fn streaming_tool_tail_height_never_decreases() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.history.push(ChatMessage {
+        model: None,
+        role: "user".to_string(),
+        content: "go".to_string(),
+        reasoning_content: None,
+        attachments: vec![],
+    });
+    app.sending = true;
+    app.request_started_at = Some(Instant::now());
+    app.transcript_width = 60;
+
+    // Rows longer than the width mixed with short ones, streamed in chunks
+    // that leave partials at every boundary.
+    let mut script = String::new();
+    for i in 0..12 {
+        if i % 3 == 0 {
+            script.push_str(&"x".repeat(120));
+        } else {
+            script.push_str(&format!("short line {i}"));
+        }
+        script.push('\n');
+    }
+    let mut prev = 0usize;
+    let mut at = 0usize;
+    while at < script.len() {
+        let end = (at + 7).min(script.len());
+        app.push_tool_output(&script[at..end]);
+        at = end;
+        let full = app.build_transcript();
+        let rows = wrap_transcript(&full.lines, &full.bar_colors, app.transcript_width)
+            .rows
+            .len();
+        assert!(
+            rows >= prev,
+            "tail block shrank ({prev} → {rows} rows) at byte {end}"
+        );
+        prev = rows;
+    }
+}
