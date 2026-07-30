@@ -478,6 +478,86 @@ async fn test_plan_mode_enter_and_approval_verdicts() {
     );
 }
 
+/// A cursor key's approved plan arms the turn-end auto-continue; a native key
+/// must not (its engine resumes in-turn).
+#[tokio::test]
+async fn test_cursor_plan_approval_arms_auto_continue() {
+    use crate::agent::protocol::PlanDecision;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+
+    let approve = |app: &mut super::super::CodeTuiApp| {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        app.cards
+            .set_plan_approval(super::super::PendingPlanApproval {
+                body: vec![],
+                scroll: 0,
+                selected: 0,
+                reply,
+            });
+        app.pick_plan_approval_option(0);
+        rx
+    };
+
+    let mut rx1 = approve(&mut app);
+    assert_eq!(rx1.try_recv().unwrap(), Ok(PlanDecision::Approve));
+    assert!(!app.cursor_plan_go_pending, "native key must not arm");
+
+    app.key.base_url = crate::services::cursor_acp::CURSOR_ACP_SENTINEL.to_string();
+    let mut rx2 = approve(&mut app);
+    assert_eq!(rx2.try_recv().unwrap(), Ok(PlanDecision::Approve));
+    assert!(app.cursor_plan_go_pending, "cursor approval arms");
+
+    // Keep-planning revises within the same turn — must not arm.
+    app.cursor_plan_go_pending = false;
+    let (reply, _rx3) = tokio::sync::oneshot::channel();
+    app.cards
+        .set_plan_approval(super::super::PendingPlanApproval {
+            body: vec![],
+            scroll: 0,
+            selected: 0,
+            reply,
+        });
+    app.pick_plan_approval_option(2);
+    assert!(!app.cursor_plan_go_pending);
+}
+
+/// The armed auto-continue is one-shot: unarmed → no-op; armed while `sending`
+/// or after an errored turn → disarms without dispatching.
+#[tokio::test]
+async fn test_cursor_plan_auto_continue_guards() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.key.base_url = crate::services::cursor_acp::CURSOR_ACP_SENTINEL.to_string();
+
+    // Unarmed → no-op.
+    app.maybe_continue_cursor_plan().await.unwrap();
+    assert!(app.history.is_empty());
+    assert!(!app.sending);
+
+    // Armed but sending → disarm, no send.
+    app.cursor_plan_go_pending = true;
+    app.sending = true;
+    app.maybe_continue_cursor_plan().await.unwrap();
+    assert!(!app.cursor_plan_go_pending);
+    assert!(app.history.is_empty());
+    app.sending = false;
+
+    // Armed after an errored turn → disarm, no send.
+    app.history.push(ChatMessage {
+        model: None,
+        role: "error".to_string(),
+        content: "boom".to_string(),
+        reasoning_content: None,
+        attachments: vec![],
+    });
+    app.cursor_plan_go_pending = true;
+    app.maybe_continue_cursor_plan().await.unwrap();
+    assert!(!app.cursor_plan_go_pending);
+    assert_eq!(app.history.len(), 1, "no continuation row was dispatched");
+    assert!(!app.sending);
+}
+
 /// Shift+Tab cycles the agent mode Claude Code-style: default → auto → plan →
 /// review → default, with the modes mutually exclusive. Mid-turn the plan step
 /// is skipped (the engine can't be restricted while a turn holds it).

@@ -3083,6 +3083,12 @@ pub(super) struct CodeTuiApp {
     /// `false` = `agent`. Applied via `session/set_mode`, re-applied on re-open.
     /// Cursor keys only.
     pub(super) cursor_plan_mode: bool,
+    /// Armed on plan approval: cursor ends its turn after an accepted
+    /// `cursor/create_plan`, so turn-end auto-sends the build go-ahead.
+    pub(super) cursor_plan_go_pending: bool,
+    /// Bumped per cursor prompt turn so the `cursor/update_todos` sink can
+    /// tell a turn's first push from later ones.
+    pub(super) cursor_turn_seq: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// A resumed session's durable agent transcript (raw OpenAI messages with
     /// tool_calls + results), awaiting the next engine build to be restored
     /// verbatim (exact tool history). Consumed (`take`) on build; `None` otherwise.
@@ -3594,6 +3600,8 @@ impl CodeTuiApp {
             cursor_acp_session: None,
             cursor_prewarm: None,
             cursor_plan_mode: false,
+            cursor_plan_go_pending: false,
+            cursor_turn_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_agent_messages: None,
             pristine_import_len: None,
             import_fidelity: None,

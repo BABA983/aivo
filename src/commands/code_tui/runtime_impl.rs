@@ -1450,18 +1450,15 @@ impl CodeTuiApp {
         let tx = self.tx.clone();
         let buffer =
             std::sync::Arc::new(std::sync::Mutex::new(Vec::<cursor_acp::CursorTodo>::new()));
+        let turn_seq = self.cursor_turn_seq.clone();
+        // u64::MAX ≠ any real seq: the session's first push is turn-first.
+        let seen_seq = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX));
         std::sync::Arc::new(move |update: cursor_acp::CursorTodosUpdate| {
             let items = {
                 let mut list = buffer.lock().unwrap();
-                if !update.merge {
-                    list.clear();
-                }
-                for todo in update.todos {
-                    match list.iter_mut().find(|t| t.id == todo.id) {
-                        Some(existing) => *existing = todo,
-                        None => list.push(todo),
-                    }
-                }
+                let seq = turn_seq.load(std::sync::atomic::Ordering::Relaxed);
+                let first_of_turn = seen_seq.swap(seq, std::sync::atomic::Ordering::Relaxed) != seq;
+                apply_cursor_todos_update(&mut list, update, first_of_turn);
                 list.iter()
                     .map(|t| {
                         serde_json::json!({
@@ -1518,6 +1515,8 @@ impl CodeTuiApp {
     }
 
     fn spawn_cursor_turn(&mut self, input: String, attachments: Vec<MessageAttachment>) {
+        self.cursor_turn_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Existing session: clone handles cheaply and skip the open step.
         let existing = self.cursor_acp_session.as_ref().map(|session| {
             (
@@ -3318,6 +3317,49 @@ pieces and keep going"
         }
     }
 
+    /// Auto-send the build go-ahead after an approved cursor plan — cursor ends
+    /// its turn once `cursor/create_plan` is accepted and waits for the client
+    /// (the IDE's Build button). Armed by the approval card.
+    pub(super) async fn maybe_continue_cursor_plan(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.cursor_plan_go_pending) {
+            return Ok(());
+        }
+        // An errored turn must not auto-run its plan.
+        let errored = self
+            .history
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role.as_str(), "assistant" | "error"))
+            .is_some_and(|m| m.role == "error");
+        if self.sending || errored {
+            return Ok(());
+        }
+        if self.cursor_plan_mode {
+            self.set_cursor_mode(false).await;
+        }
+        // Stash the composer so the dispatch can't wipe a mid-turn draft or
+        // attach the user's staged files.
+        let draft = std::mem::take(&mut self.draft);
+        let cursor = self.cursor;
+        let attachments = std::mem::take(&mut self.draft_attachments);
+        let sent = self
+            .dispatch_user_message_shown(
+                "The plan is approved — implement it now.".to_string(),
+                None,
+                Some("/plan go".to_string()),
+            )
+            .await;
+        self.draft = draft;
+        self.cursor = cursor;
+        self.draft_attachments = attachments;
+        self.sync_command_menu_state();
+        // Propagating would abort the event loop over one bad dispatch.
+        if let Err(e) = sent {
+            self.notice = Some((ERROR(), e.to_string()));
+        }
+        Ok(())
+    }
+
     /// After a plan-mode turn that ended WITHOUT an approval, stash the agent's
     /// last reply as the drafted plan (for `/plan go`) and frame it as the plan
     /// card. Plan mode and the read-only engine persist. No-op otherwise.
@@ -3419,6 +3461,7 @@ pieces and keep going"
         // re-prewarm so the next message's connect overlaps typing.
         self.cursor_acp_session = None;
         self.cursor_plan_mode = false; // fresh session opens in `agent`
+        self.cursor_plan_go_pending = false;
         self.prewarm_cursor_session();
         // Drop the agent engine + serve so a fresh chat starts with no context.
         self.agent_engine = None;
@@ -3439,6 +3482,7 @@ pieces and keep going"
         // The interrupt-with-partial path clears it separately, before this runs.
         self.goal_mode = None;
         self.goal_guard_stop = None;
+        self.cursor_plan_go_pending = false;
         // A cancelled /compact must not mark the NEXT turn as a compact.
         self.compact_before = None;
         // Plan mode persists across an interrupt (it's a session mode). Apply a
@@ -3528,8 +3572,10 @@ pieces and keep going"
         // through here; the partial-text path below doesn't call
         // `cancel_inflight_request`, so clear it up front for both).
         let goal_was_active = self.goal_mode.take().is_some();
-        // Same for /compact (the partial-text path skips `cancel_inflight_request`).
+        // Same for /compact and the approved-plan auto-continue (the
+        // partial-text path skips `cancel_inflight_request`).
         self.compact_before = None;
+        self.cursor_plan_go_pending = false;
         // Reveal any buffered text so the full received reply is kept, and drop
         // a deferred finish — we're committing the partial turn ourselves.
         self.drain_incoming_buffer();
@@ -4378,6 +4424,30 @@ fn todo_checkbox(status: &str) -> &'static str {
     }
 }
 
+/// Fold one `cursor/update_todos` push into the todo list: merge in place, or
+/// replace on non-merge. A turn's FIRST push sharing no ids also replaces —
+/// models restate the list under fresh ids on a new turn, and merging that
+/// would leave the superseded rows dangling as never-completed.
+fn apply_cursor_todos_update(
+    list: &mut Vec<cursor_acp::CursorTodo>,
+    update: cursor_acp::CursorTodosUpdate,
+    first_of_turn: bool,
+) {
+    let overlaps = update
+        .todos
+        .iter()
+        .any(|t| list.iter().any(|e| e.id == t.id));
+    if !update.merge || (first_of_turn && !overlaps) {
+        list.clear();
+    }
+    for todo in update.todos {
+        match list.iter_mut().find(|t| t.id == todo.id) {
+            Some(existing) => *existing = todo,
+            None => list.push(todo),
+        }
+    }
+}
+
 /// Map a cursor todo status to aivo's 3-state plan status; `cancelled`→`completed`.
 fn map_cursor_todo_status(status: &str) -> &'static str {
     match status {
@@ -4535,6 +4605,77 @@ mod ask_id_tests {
             phases: vec![],
         };
         assert!(render_cursor_plan_markdown(&req).contains("no details"));
+    }
+
+    #[test]
+    fn cursor_todos_update_merges_replaces_and_drops_stale_restatements() {
+        use super::apply_cursor_todos_update;
+        use crate::services::cursor_acp::CursorTodosUpdate;
+        let todo = |id: &str, status: &str| CursorTodo {
+            id: id.into(),
+            content: format!("task {id}"),
+            status: status.into(),
+        };
+
+        let mut list = Vec::new();
+        apply_cursor_todos_update(
+            &mut list,
+            CursorTodosUpdate {
+                todos: vec![todo("a", "pending"), todo("b", "pending")],
+                merge: false,
+            },
+            true,
+        );
+        assert_eq!(list.len(), 2);
+
+        // Mid-turn merge: flip in place, append the new id.
+        apply_cursor_todos_update(
+            &mut list,
+            CursorTodosUpdate {
+                todos: vec![todo("a", "completed"), todo("c", "pending")],
+                merge: true,
+            },
+            false,
+        );
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].status, "completed");
+
+        // Turn-first merge sharing ids keeps the list.
+        apply_cursor_todos_update(
+            &mut list,
+            CursorTodosUpdate {
+                todos: vec![todo("b", "completed")],
+                merge: true,
+            },
+            true,
+        );
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[1].status, "completed");
+
+        // Turn-first merge with all-fresh ids is a restatement: replace.
+        apply_cursor_todos_update(
+            &mut list,
+            CursorTodosUpdate {
+                todos: vec![todo("x", "in_progress"), todo("y", "pending")],
+                merge: true,
+            },
+            true,
+        );
+        assert_eq!(
+            list.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
+
+        // Mid-turn all-fresh append still merges.
+        apply_cursor_todos_update(
+            &mut list,
+            CursorTodosUpdate {
+                todos: vec![todo("z", "pending")],
+                merge: true,
+            },
+            false,
+        );
+        assert_eq!(list.len(), 3);
     }
 
     #[test]

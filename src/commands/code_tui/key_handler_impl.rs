@@ -550,6 +550,10 @@ impl CodeTuiApp {
                 self.plan_card_idx = None;
                 self.set_auto_quiet(auto_approve);
                 self.set_review_quiet(!auto_approve);
+                // cursor ends its turn after an accepted plan; arm the go-ahead.
+                if self.key.is_cursor_acp() {
+                    self.cursor_plan_go_pending = true;
+                }
                 self.show_toast(if auto_approve {
                     "Plan approved — executing with auto-approve"
                 } else {

@@ -1283,6 +1283,7 @@ impl CodeTuiApp {
         self.refresh_skill_commands().await;
         self.drain_queued_commands().await;
         self.drain_queued_message().await?;
+        self.maybe_continue_cursor_plan().await?;
         Ok(())
     }
 
@@ -1465,6 +1466,8 @@ impl CodeTuiApp {
     }
 
     pub(super) async fn finish_failed_response(&mut self, err: String) {
+        // A failed turn must not auto-run its plan.
+        self.cursor_plan_go_pending = false;
         self.pending_response.clear();
         self.incoming_buffer.clear();
         self.pending_finish = None;
