@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.43.2
+
+A reliability and size patch. Cursor-backed code sessions no longer stall after an approved plan, and multi-vendor gateway routes keep the user-selected model instead of rewriting it. Also: a smaller binary via build-time compression of embedded assets, and a symmetric code TUI footer inset.
+
+- fix(code): cursor sessions no longer stall after an approved plan (2f394cdf)
+- fix(serve): keep user-selected model on multi-vendor gateway routes (15ef13fe)
+- improve(build): optimize binary size (a3fa56a9)
+- improve(code): symmetric footer inset (fe50477d)
+
 ## v0.43.1
 
 A Windows fixes patch. Pasting multi-line text into the code TUI no longer submits the draft once per line, and copying to the clipboard actually copies instead of silently clearing it. Also: login sessions are excluded from `keys export` entirely, the `/review` slash command is gone, and the `/config` vision row names the describer model you actually picked.
