@@ -8,21 +8,12 @@ use serde_json::{Value, json};
 use crate::cli::{AccountArgs, AccountOpenArgs, AccountSubcommand};
 use crate::commands::login::{AccountSync, sync_account_status};
 use crate::commands::stats::{colorize_unit, format_human};
-use crate::commands::{LoginCommand, LogoutCommand, trim_to_one_line};
+use crate::commands::{LoginCommand, LogoutCommand, spin, trim_to_one_line};
 use crate::errors::ExitCode;
 use crate::services::account_store;
 use crate::services::device_auth::{self, AccountUsage, UsageSummary};
 use crate::services::session_store::SessionStore;
 use crate::style;
-
-/// Runs `fut` under a stderr spinner. No-op off a TTY, so `--json`/pipes stay clean.
-async fn spin<F: std::future::Future>(label: &str, fut: F) -> F::Output {
-    let (spinning, handle) = style::start_spinner(Some(label));
-    let out = fut.await;
-    style::stop_spinner(&spinning);
-    let _ = handle.await;
-    out
-}
 
 pub struct AccountCommand {
     session_store: SessionStore,

@@ -36,6 +36,15 @@ pub(crate) fn print_no_key_error() {
 
 pub(crate) use crate::services::http_utils::normalize_base_url;
 
+/// Runs `fut` under a stderr spinner. No-op off a TTY, so `--json`/pipes stay clean.
+pub(crate) async fn spin<F: std::future::Future>(label: &str, fut: F) -> F::Output {
+    let (spinning, handle) = style::start_spinner(Some(label));
+    let out = fut.await;
+    style::stop_spinner(&spinning);
+    let _ = handle.await;
+    out
+}
+
 /// Truncates `text` to its first line, then to `max_cols` terminal columns
 /// with an ellipsis. Width-aware: CJK chars count as 2 columns so picker
 /// rows don't overflow the terminal and wrap to a second row.

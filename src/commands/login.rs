@@ -39,30 +39,31 @@ impl LoginCommand {
     async fn execute_internal(&self, args: LoginArgs) -> Result<ExitCode> {
         // Re-verify against the server before deciding we're already logged in:
         // the device may have been unlinked from the dashboard since last time.
-        let relink = match sync_account_status().await {
-            AccountSync::Linked(account) => {
-                println!(
-                    "  {} Already logged in as {}.",
-                    style::success_symbol(),
-                    style::bold(account.display())
-                );
-                return Ok(ExitCode::Success);
-            }
-            AccountSync::Unverified(Some(account)) => {
-                // Couldn't reach the server; trust the local cache rather than
-                // forcing a re-login on a flaky network.
-                println!(
-                    "  {} Already logged in as {} {}.",
-                    style::success_symbol(),
-                    style::bold(account.display()),
-                    style::dim("(couldn't verify with the server)")
-                );
-                return Ok(ExitCode::Success);
-            }
-            // Previous link removed: note it in the header, then re-link.
-            AccountSync::Unlinked { had_local: true } => true,
-            AccountSync::Unlinked { had_local: false } | AccountSync::Unverified(None) => false,
-        };
+        let relink =
+            match crate::commands::spin(" Checking login status...", sync_account_status()).await {
+                AccountSync::Linked(account) => {
+                    println!(
+                        "  {} Already logged in as {}.",
+                        style::success_symbol(),
+                        style::bold(account.display())
+                    );
+                    return Ok(ExitCode::Success);
+                }
+                AccountSync::Unverified(Some(account)) => {
+                    // Couldn't reach the server; trust the local cache rather than
+                    // forcing a re-login on a flaky network.
+                    println!(
+                        "  {} Already logged in as {} {}.",
+                        style::success_symbol(),
+                        style::bold(account.display()),
+                        style::dim("(couldn't verify with the server)")
+                    );
+                    return Ok(ExitCode::Success);
+                }
+                // Previous link removed: note it in the header, then re-link.
+                AccountSync::Unlinked { had_local: true } => true,
+                AccountSync::Unlinked { had_local: false } | AccountSync::Unverified(None) => false,
+            };
 
         // Headless (agent shell, CI, both ends piped): nobody can see the code or
         // approve it, so the poll below would just block to expiry. Refuse fast.
@@ -86,7 +87,11 @@ impl LoginCommand {
 
         let label = args.label.unwrap_or_else(default_label);
 
-        let device = device_auth::start_device_auth(Some(&label)).await?;
+        let device = crate::commands::spin(
+            " Requesting sign-in code...",
+            device_auth::start_device_auth(Some(&label)),
+        )
+        .await?;
 
         // Show the code-prefilled URL so visiting or scanning it needs no
         // typing; it's also what Enter opens. Polling below starts regardless,
@@ -131,7 +136,11 @@ impl LoginCommand {
             }
         };
 
-        let account = finalize_login(user, &self.session_store).await?;
+        let account = crate::commands::spin(
+            " Finishing sign-in...",
+            finalize_login(user, &self.session_store),
+        )
+        .await?;
 
         println!(
             "  {} Logged in as {}",
