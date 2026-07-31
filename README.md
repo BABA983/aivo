@@ -1,7 +1,7 @@
 [![aivo](https://getaivo.dev/banner.webp)](https://getaivo.dev)
 
-Aivo `/ˈeɪ.voʊ/` is a lightweight CLI that runs coding agents — Claude Code, Codex, Gemini,
-OpenCode, Pi, and more — keeps your keys encrypted, and ships starter models that need no API key.
+Aivo `/ˈeɪ.voʊ/` lets you use your favorite coding agent — Claude Code, Codex, Gemini, OpenCode,
+Pi, and more — with any model. Manage API keys. Or work directly in the built-in Aivo Code.
 
 ![CI](https://github.com/yuanchuan/aivo/actions/workflows/ci.yml/badge.svg)
 ![Release](https://img.shields.io/github/v/tag/yuanchuan/aivo?label=release&color=brightgreen)
@@ -114,12 +114,12 @@ aivo keys add --base-url https://api.groq.com/openai/v1 --api-key sk-xxx
 Move keys between machines via a password-encrypted file:
 
 ```bash
-aivo keys export ~/bak.keys     # prompts for password
-aivo keys import ~/bak.keys     # same password on the other machine
-aivo keys import https://example.com/bak.keys   # or from a URL
+aivo keys export ~/keys.bak     # prompts for password
+aivo keys import ~/keys.bak     # same password on the other machine
+aivo keys import https://example.com/keys.bak   # or from a URL
 
 # non-interactive with password on stdin
-aivo keys export ~/bak.keys --password-stdin <<< "my secret password"
+aivo keys export ~/keys.bak --password-stdin <<< "my secret password"
 ```
 
 ### account
@@ -148,7 +148,8 @@ aivo models --json | jq '.models[].id'
 
 ### code
 
-`aivo code` is the built-in coding agent in your terminal.
+Aivo Code (`aivo code`) is the built-in coding agent in your terminal — session tools, skills,
+MCP servers, and any model you choose, from a frontier API to a local GGUF.
 
 ![aivo](https://getaivo.dev/aivo-chat.webp)
 
