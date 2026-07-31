@@ -2521,6 +2521,19 @@ pub(super) struct SubagentRow {
     pub(super) done: Option<(bool, usize, u64, std::time::Duration)>,
 }
 
+/// One cursor-ACP turn's `/rewind` checkpoint (see `acp_checkpoints`).
+pub(super) struct AcpCheckpoint {
+    /// User row in `history`; validated against `prompt` at use time so index
+    /// drift degrades to conversation-only, never a wrong revert.
+    pub(super) history_index: usize,
+    pub(super) prompt: String,
+    /// Pre-turn tree snapshot; `None` = pending or failed (non-revertible alone).
+    pub(super) tree: Option<String>,
+    /// Paths the turn changed; `None` = still open (interrupted turn) →
+    /// finalized lazily at rewind time.
+    pub(super) changed: Option<Vec<std::path::PathBuf>>,
+}
+
 pub(super) enum RuntimeEvent {
     Delta(ChatResponseChunk),
     Finished {
@@ -2545,6 +2558,19 @@ pub(super) enum RuntimeEvent {
     /// event loop stores it on the app so subsequent turns reuse it without
     /// paying the Node.js startup cost again.
     CursorSessionOpened(crate::services::cursor_acp::CursorAcpSession),
+    /// A cursor turn's pre-prompt `/rewind` tree snapshot, taken on the turn
+    /// task. `turn_seq` (the `cursor_turn_seq` stamp) drops stale events from
+    /// an aborted task racing a newer turn.
+    AcpSnapshot {
+        turn_seq: u64,
+        tree: Option<String>,
+    },
+    /// The paths a cursor turn changed, at turn end. `None` = diff failed →
+    /// the turn reads non-revertible instead of "changed nothing".
+    AcpChanged {
+        turn_seq: u64,
+        changed: Option<Vec<std::path::PathBuf>>,
+    },
     /// The agent engine invoked a tool — render a `→ verb(args)` transcript step.
     /// `id` (cursor's `toolCallId`) correlates a later `AgentToolUpdate`; `None`
     /// for the in-process agent, which reports results separately.
@@ -3079,6 +3105,14 @@ pub(super) struct CodeTuiApp {
             std::result::Result<crate::services::cursor_acp::CursorAcpSession, String>,
         >,
     >,
+    /// `/rewind` checkpoints for cursor ACP turns — cursor runs its tools
+    /// out-of-process, so the engine's lazy pre-edit snapshot never fires.
+    /// In-memory, cleared/retained alongside `agent_turn_indices`.
+    pub(super) acp_checkpoints: Vec<AcpCheckpoint>,
+    /// Shadow-git store backing `acp_checkpoints`. Mutexed because turn tasks
+    /// snapshot/diff it off the event loop (a cold snapshot hashes the tree).
+    pub(super) acp_checkpoint_store:
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::agent::checkpoint::CheckpointStore>>>,
     /// Desired cursor ACP mode: `true` = `plan` (emits `cursor/create_plan`),
     /// `false` = `agent`. Applied via `session/set_mode`, re-applied on re-open.
     /// Cursor keys only.
@@ -3599,6 +3633,8 @@ impl CodeTuiApp {
             paste_burst_newline: false,
             cursor_acp_session: None,
             cursor_prewarm: None,
+            acp_checkpoints: Vec::new(),
+            acp_checkpoint_store: None,
             cursor_plan_mode: false,
             cursor_plan_go_pending: false,
             cursor_turn_seq: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),

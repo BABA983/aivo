@@ -446,6 +446,7 @@ impl CodeTuiApp {
         let route_agent = self.agent_capable()
             && ((attachments.is_empty() && !stay_plain_for_vision) || agent_vision_ok);
         if self.key.is_cursor_acp() {
+            self.push_acp_checkpoint();
             self.spawn_cursor_turn(input, attachments);
         } else if route_agent {
             self.spawn_agent_turn(input, attachments, vision_shim).await;
@@ -1514,9 +1515,36 @@ impl CodeTuiApp {
         }));
     }
 
+    /// Open an `/rewind` checkpoint for the cursor turn being dispatched. The
+    /// tree snapshot itself runs on the turn task so a cold first snapshot
+    /// never blocks the event loop.
+    fn push_acp_checkpoint(&mut self) {
+        let Some(history_index) = self.history.len().checked_sub(1) else {
+            return;
+        };
+        let row = &self.history[history_index];
+        if row.role != "user" {
+            return;
+        }
+        if self.acp_checkpoint_store.is_none() {
+            let cwd = self.cursor_workspace_cwd();
+            self.acp_checkpoint_store = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::agent::checkpoint::CheckpointStore::new(std::path::Path::new(&cwd)),
+            )));
+        }
+        self.acp_checkpoints.push(AcpCheckpoint {
+            history_index,
+            prompt: row.content.clone(),
+            tree: None,
+            changed: None,
+        });
+    }
+
     fn spawn_cursor_turn(&mut self, input: String, attachments: Vec<MessageAttachment>) {
-        self.cursor_turn_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let turn_seq = self
+            .cursor_turn_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         // Existing session: clone handles cheaply and skip the open step.
         let existing = self.cursor_acp_session.as_ref().map(|session| {
             (
@@ -1538,11 +1566,23 @@ impl CodeTuiApp {
         let hooks = self.cursor_interaction_hooks();
         // Consume the startup prewarm so we reuse its open, not a second one.
         let prewarm = self.cursor_prewarm.take();
+        let acp_store = self.acp_checkpoint_store.clone();
 
         // Open + prompt happen inside the spawned task so the TUI event loop
         // keeps polling input. The Node.js startup + 3 RPC roundtrips on a
         // first-message cold open used to block keyboard handling.
         self.response_task = Some(tokio::spawn(async move {
+            // `/rewind` snapshot: the only point guaranteed to precede the
+            // turn's edits (cursor runs its tools out-of-process).
+            let acp_tree = match &acp_store {
+                Some(store) => store.lock().await.snapshot().await,
+                None => None,
+            };
+            tx.send(RuntimeEvent::AcpSnapshot {
+                turn_seq,
+                tree: acp_tree.clone(),
+            })
+            .ok();
             let (client, session_id, model_id, capabilities) = match existing {
                 Some(handles) => handles,
                 None => {
@@ -1593,6 +1633,12 @@ impl CodeTuiApp {
                             handles
                         }
                         Err(e) => {
+                            // No prompt sent — the turn changed nothing.
+                            tx.send(RuntimeEvent::AcpChanged {
+                                turn_seq,
+                                changed: Some(Vec::new()),
+                            })
+                            .ok();
                             tx.send(RuntimeEvent::Finished {
                                 result: Err(e.to_string()),
                                 format,
@@ -1607,6 +1653,11 @@ impl CodeTuiApp {
             if let Err(e) =
                 cursor_acp::ensure_image_attachments_supported(&capabilities, &attachments)
             {
+                tx.send(RuntimeEvent::AcpChanged {
+                    turn_seq,
+                    changed: Some(Vec::new()),
+                })
+                .ok();
                 tx.send(RuntimeEvent::Finished {
                     result: Err(e.to_string()),
                     format,
@@ -1618,6 +1669,13 @@ impl CodeTuiApp {
             let result = drive_cursor_turn(client, session_id, model_id, input, attachments, &tx)
                 .await
                 .map_err(|err| err.to_string());
+            // Close the checkpoint before Finished (same channel = ordered);
+            // an interrupted turn aborts this task → finalized lazily at rewind.
+            let changed = match (&acp_store, &acp_tree) {
+                (Some(store), Some(tree)) => store.lock().await.changed_since(tree).await,
+                _ => Some(Vec::new()),
+            };
+            tx.send(RuntimeEvent::AcpChanged { turn_seq, changed }).ok();
             tx.send(RuntimeEvent::Finished { result, format }).ok();
         }));
     }
@@ -1918,9 +1976,11 @@ impl CodeTuiApp {
     /// `/rewind`: open the picker listing every past user turn (newest first), so
     /// the user can jump back to one. Selecting a turn (see [`rewind_to_turn`])
     /// truncates the conversation there, reverts the agent's file edits made since,
-    /// and restores that turn's prompt to the composer for edit/resend. Rows without
-    /// their own checkpoint revert newer turns' edits through the nearest newer one;
-    /// "conversation only" marks rows where no file revert is possible.
+    /// and restores that turn's prompt to the composer for edit/resend. Engine turns
+    /// use the engine's checkpoints; cursor-ACP turns the TUI-side `acp_checkpoints`.
+    /// Rows without their own checkpoint revert newer turns' edits through the
+    /// nearest newer one; "conversation only" marks rows where no file revert is
+    /// possible.
     pub(super) async fn open_rewind_picker(&mut self) -> Result<()> {
         if self.sending {
             self.queue_command(SlashCommand::Rewind, "/rewind");
@@ -1978,17 +2038,40 @@ impl CodeTuiApp {
                 nearest_newer = row_ordinal[turn_idx];
             }
         }
+        // ACP rows: revertible when any still-valid checkpoint at-or-after them
+        // has a tree — the same nearest-newer rule as the engine's targets.
+        let acp_valid: Vec<bool> = self
+            .acp_checkpoints
+            .iter()
+            .map(|cp| {
+                self.history
+                    .get(cp.history_index)
+                    .is_some_and(|m| m.role == "user" && m.content == cp.prompt)
+            })
+            .collect();
+        let mut acp_tree_from = vec![false; self.acp_checkpoints.len()];
+        let mut seen_tree = false;
+        for (i, cp) in self.acp_checkpoints.iter().enumerate().rev() {
+            seen_tree |= acp_valid[i] && cp.tree.is_some();
+            acp_tree_from[i] = seen_tree;
+        }
         let mut items = Vec::with_capacity(turn_count);
         for (turn_idx, &history_index) in user_indices.iter().enumerate() {
             let ordinal = row_boundary[turn_idx];
             // The engine transcript can only truncate to a turn it checkpointed
             // itself; other rows revert files, then drop and re-seed the engine.
             let keep_engine = row_ordinal[turn_idx].is_some();
+            let acp_revertible = self
+                .acp_checkpoints
+                .iter()
+                .position(|cp| cp.history_index >= history_index)
+                .is_some_and(|b| acp_tree_from[b]);
             // Files won't revert if no checkpoint applies or none from it has a tree.
-            let conversation_only = match ordinal {
-                Some(ord) => !targets[ord].1,
-                None => true,
-            };
+            let conversation_only = !acp_revertible
+                && match ordinal {
+                    Some(ord) => !targets[ord].1,
+                    None => true,
+                };
             let prompt = rewind_excerpt(&self.history[history_index].content);
             let suffix = rewind_label_suffix(conversation_only);
             items.push(PickerEntry {
@@ -2003,6 +2086,15 @@ impl CodeTuiApp {
         }
         // Newest turn at the top — the common rewind target.
         items.reverse();
+        // Same permanent block for the ACP store; `try_lock` is uncontended
+        // (`sending` guarded above) and a miss only softens the title.
+        let revert_block = revert_block.or_else(|| {
+            self.acp_checkpoint_store.as_ref().and_then(|s| {
+                s.try_lock()
+                    .ok()
+                    .and_then(|s| s.permanent_disabled_reason())
+            })
+        });
         // Home/root launch dirs never snapshot — explain once in the title.
         let title = match revert_block {
             Some("home directory") => "Rewind to turn — file revert off (launched in home dir)",
@@ -2041,6 +2133,8 @@ impl CodeTuiApp {
             return Ok(());
         }
         let removed = self.history[history_index].clone();
+        // Before the truncate — validation reads the rows being rewound.
+        let acp_report = self.revert_acp_checkpoints(history_index).await;
         self.history.truncate(history_index);
         // Surviving indices are unchanged by the truncation — keep them.
         self.agent_turn_indices.retain(|&i| i < history_index);
@@ -2067,8 +2161,13 @@ impl CodeTuiApp {
                 // uncontended (`sending` guarded above).
                 let session = self.agent_engine.as_ref().expect("engine present");
                 let mut engine = session.engine.lock().await;
-                let outcome = engine.rewind_to(ord).await;
+                let mut outcome = engine.rewind_to(ord).await;
                 drop(engine);
+                if let Some(report) = acp_report {
+                    outcome.restored += report.restored;
+                    outcome.deleted += report.deleted;
+                    outcome.error = outcome.error.or(report.error);
+                }
                 if !keep_engine {
                     // The engine transcript can't truncate to this un-checkpointed
                     // target: drop it and clear the durable transcript, or a
@@ -2093,7 +2192,14 @@ impl CodeTuiApp {
                     .session_store
                     .save_agent_messages(&self.session_id, &[])
                     .await;
-                "Rewound (conversation only — file edits not reverted)".to_string()
+                match acp_report {
+                    Some(report) => rewind_notice(&RewindOutcome {
+                        restored: report.restored,
+                        deleted: report.deleted,
+                        error: report.error,
+                    }),
+                    None => "Rewound (conversation only — file edits not reverted)".to_string(),
+                }
             }
         };
         // The measured fill described the truncated turns — re-estimate, or the
@@ -2104,6 +2210,52 @@ impl CodeTuiApp {
         self.notice = Some((MUTED(), notice));
         self.persist_history().await?;
         Ok(())
+    }
+
+    /// Revert the file edits of cursor-ACP turns at/after `history_index` and
+    /// drop their checkpoints. `None` = nothing applied.
+    async fn revert_acp_checkpoints(
+        &mut self,
+        history_index: usize,
+    ) -> Option<crate::agent::checkpoint::RestoreReport> {
+        let split = self
+            .acp_checkpoints
+            .iter()
+            .position(|cp| cp.history_index >= history_index)?;
+        let rewound = self.acp_checkpoints.split_off(split);
+        let store = self.acp_checkpoint_store.clone()?;
+        let mut store = store.lock().await;
+        let mut tree: Option<String> = None;
+        let mut paths: std::collections::BTreeSet<std::path::PathBuf> =
+            std::collections::BTreeSet::new();
+        for cp in rewound {
+            // Skip a stale (index-drifted) checkpoint rather than risk
+            // reverting the wrong turn's paths.
+            let valid = self
+                .history
+                .get(cp.history_index)
+                .is_some_and(|m| m.role == "user" && m.content == cp.prompt);
+            if !valid {
+                continue;
+            }
+            // Oldest tree from the picked turn onward = the pre-edit state
+            // there (mirrors the engine's rewind rule).
+            if tree.is_none() {
+                tree = cp.tree.clone();
+            }
+            let changed = match cp.changed {
+                Some(c) => c,
+                // Open (interrupted turn): finalize lazily from its tree.
+                None => match &cp.tree {
+                    Some(t) => store.changed_since(t).await.unwrap_or_default(),
+                    None => Vec::new(),
+                },
+            };
+            paths.extend(changed);
+        }
+        let tree = tree?;
+        let paths: Vec<std::path::PathBuf> = paths.into_iter().collect();
+        Some(store.restore_paths(&tree, &paths).await)
     }
 
     /// `!cmd`: run a shell command locally in the agent's working dir, streaming
@@ -3412,6 +3564,9 @@ pieces and keep going"
         // After the persist above — the next session's file must not inherit these.
         self.vision_descriptions.clear();
         self.agent_turn_indices.clear();
+        // Dropping the store frees its shadow-git tempdir.
+        self.acp_checkpoints.clear();
+        self.acp_checkpoint_store = None;
         self.expanded_thinking.clear();
         self.expanded_output.clear();
         self.local_outputs.clear();
@@ -3553,8 +3708,10 @@ pieces and keep going"
                 self.history.pop();
             }
         }
-        // Either pop above may have removed a flagged user row.
+        // Either pop above may have removed a flagged user row / its checkpoint.
         self.agent_turn_indices.retain(|&i| i < self.history.len());
+        let len = self.history.len();
+        self.acp_checkpoints.retain(|cp| cp.history_index < len);
         self.cursor = self.draft.len();
         self.sync_command_menu_state();
         self.sending = false;

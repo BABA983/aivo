@@ -60,6 +60,40 @@ impl CodeTuiApp {
                     self.cursor_acp_session = Some(session);
                 }
             }
+            // Both target the newest OPEN checkpoint, only from the current turn
+            // task — a stale event must not graft onto an older turn's record.
+            RuntimeEvent::AcpSnapshot { turn_seq, tree } => {
+                if turn_seq
+                    == self
+                        .cursor_turn_seq
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    && let Some(cp) = self
+                        .acp_checkpoints
+                        .last_mut()
+                        .filter(|cp| cp.changed.is_none())
+                {
+                    cp.tree = tree;
+                }
+            }
+            RuntimeEvent::AcpChanged { turn_seq, changed } => {
+                if turn_seq
+                    == self
+                        .cursor_turn_seq
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    && let Some(cp) = self
+                        .acp_checkpoints
+                        .last_mut()
+                        .filter(|cp| cp.changed.is_none())
+                {
+                    match changed {
+                        Some(paths) => cp.changed = Some(paths),
+                        None => {
+                            cp.tree = None;
+                            cp.changed = Some(Vec::new());
+                        }
+                    }
+                }
+            }
             RuntimeEvent::AgentContext { tokens, measured } => {
                 self.apply_agent_context(tokens, measured);
             }
@@ -1459,6 +1493,8 @@ impl CodeTuiApp {
         );
         // The row flagged engine-dispatched at spawn was just popped.
         self.agent_turn_indices.retain(|&i| i < self.history.len());
+        let len = self.history.len();
+        self.acp_checkpoints.retain(|cp| cp.history_index < len);
         self.sending = false;
         self.request_started_at = None;
         self.retrying = false;

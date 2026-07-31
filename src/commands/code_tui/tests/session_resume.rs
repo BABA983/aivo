@@ -356,6 +356,132 @@ async fn test_rewind_picker_title_explains_permanent_file_revert_off() {
     );
 }
 
+/// A cursor-ACP turn with a TUI-side checkpoint tree gets file revert — and so
+/// does an older row via the nearest-newer rule — without any engine involved.
+#[tokio::test]
+async fn test_rewind_picker_acp_checkpoint_lights_up_file_revert() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    seed_two_exchanges(&mut app);
+    // Both turns ran over cursor ACP; only the newer one snapshotted a tree.
+    app.acp_checkpoints.push(AcpCheckpoint {
+        history_index: 0,
+        prompt: "first question".to_string(),
+        tree: None,
+        changed: Some(Vec::new()),
+    });
+    app.acp_checkpoints.push(AcpCheckpoint {
+        history_index: 2,
+        prompt: "second question".to_string(),
+        tree: Some("abc".to_string()),
+        changed: Some(vec![std::path::PathBuf::from("a.txt")]),
+    });
+
+    app.open_rewind_picker().await.unwrap();
+
+    let Overlay::Picker(picker) = &app.overlay else {
+        panic!("expected a rewind picker overlay");
+    };
+    assert!(
+        !picker.items[0].label.contains("conversation only"),
+        "own checkpoint tree → file revert; got: {}",
+        picker.items[0].label
+    );
+    assert!(
+        !picker.items[1].label.contains("conversation only"),
+        "treeless row reverts via the nearest newer tree; got: {}",
+        picker.items[1].label
+    );
+    // ACP rows never map to engine checkpoints — still the drop-and-reseed path.
+    let PickerValue::RewindTurn {
+        ordinal,
+        keep_engine,
+        ..
+    } = &picker.items[0].value
+    else {
+        panic!("expected a RewindTurn value");
+    };
+    assert!(ordinal.is_none());
+    assert!(!keep_engine);
+}
+
+/// A drifted checkpoint (row content no longer matches) must not count as
+/// revertible — the row degrades to conversation-only.
+#[tokio::test]
+async fn test_rewind_picker_ignores_drifted_acp_checkpoint() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    seed_two_exchanges(&mut app);
+    app.acp_checkpoints.push(AcpCheckpoint {
+        history_index: 2,
+        prompt: "SOMETHING ELSE".to_string(),
+        tree: Some("abc".to_string()),
+        changed: Some(Vec::new()),
+    });
+
+    app.open_rewind_picker().await.unwrap();
+
+    let Overlay::Picker(picker) = &app.overlay else {
+        panic!("expected a rewind picker overlay");
+    };
+    assert!(picker.items[0].label.contains("conversation only"));
+    assert!(picker.items[1].label.contains("conversation only"));
+}
+
+/// End-to-end ACP rewind: an OPEN checkpoint (interrupted turn) finalizes
+/// lazily, the turn's edit reverts, and the checkpoint list truncates.
+#[tokio::test]
+async fn test_rewind_acp_reverts_files() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.session_id = "rewind-acp".to_string();
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "v0").unwrap();
+
+    let mut store = crate::agent::checkpoint::CheckpointStore::new(dir.path());
+    if !store.git_available().await {
+        return; // git missing → skip
+    }
+    let tree = store.snapshot().await;
+    assert!(tree.is_some(), "snapshot must succeed");
+    // The cursor turn edits the file after the pre-prompt snapshot.
+    std::fs::write(dir.path().join("a.txt"), "v1").unwrap();
+
+    for (role, content) in [
+        ("user", "old ask"),
+        ("assistant", "r"),
+        ("user", "cursor ask"),
+    ] {
+        app.history.push(ChatMessage {
+            model: None,
+            role: role.to_string(),
+            content: content.to_string(),
+            reasoning_content: None,
+            attachments: vec![],
+        });
+    }
+    app.acp_checkpoints.push(AcpCheckpoint {
+        history_index: 2,
+        prompt: "cursor ask".to_string(),
+        tree,
+        changed: None, // interrupted before turn end → finalized at rewind
+    });
+    app.acp_checkpoint_store = Some(std::sync::Arc::new(tokio::sync::Mutex::new(store)));
+
+    app.rewind_to_turn(2, None, false).await.unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "v0",
+        "the cursor turn's edit reverts"
+    );
+    assert!(app.acp_checkpoints.is_empty());
+    assert_eq!(app.history.len(), 2);
+    assert_eq!(app.draft, "cursor ask");
+    let (_, msg) = app.notice.as_ref().expect("a notice");
+    assert!(msg.contains("restored 1 file"), "got: {msg}");
+}
+
 #[tokio::test]
 async fn test_open_rewind_picker_with_no_turns_notices() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();

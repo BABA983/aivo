@@ -2974,6 +2974,8 @@ is preserved."
         self.history = session.messages;
         // Resumed rows never map to live checkpoints (the store is session-scoped).
         self.agent_turn_indices.clear();
+        self.acp_checkpoints.clear();
+        self.acp_checkpoint_store = None;
         self.expanded_thinking.clear();
         self.expanded_output.clear();
         self.local_outputs.clear();
