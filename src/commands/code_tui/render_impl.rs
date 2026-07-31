@@ -1967,8 +1967,13 @@ impl CodeTuiApp {
         let option_budget = usize::from(max_total)
             .saturating_sub(lines.len() + chrome_after)
             .max(1);
-        let shown = ask.options.len().min(option_budget);
-        for (i, opt) in ask.options.iter().enumerate().take(shown) {
+
+        // Long descriptions wrap onto rows hanging under the label; the compact
+        // one-row form is the fallback when the wrapped list won't fit.
+        const MAX_OPT_ROWS: usize = 3;
+        let mut groups: Vec<Vec<Line<'static>>> = Vec::with_capacity(ask.options.len());
+        let mut compact: Vec<Line<'static>> = Vec::with_capacity(ask.options.len());
+        for (i, opt) in ask.options.iter().enumerate() {
             let selected = i == ask.selected;
             let marker_style = if selected {
                 Style::default().fg(ACCENT()).add_modifier(Modifier::BOLD)
@@ -1980,7 +1985,7 @@ impl CodeTuiApp {
             } else {
                 Style::default().fg(TEXT())
             };
-            let mut spans = vec![Span::styled(
+            let mut prefix = vec![Span::styled(
                 if selected { "❯ " } else { "  " },
                 marker_style,
             )];
@@ -1991,19 +1996,54 @@ impl CodeTuiApp {
                 } else {
                     Style::default().fg(FAINT())
                 };
-                spans.push(Span::styled(
+                prefix.push(Span::styled(
                     if checked { "[✓] " } else { "[ ] " },
                     box_style,
                 ));
             }
-            spans.push(Span::styled(
+            prefix.push(Span::styled(
                 format!("{}. ", i + 1),
                 Style::default().fg(MUTED()),
             ));
-            // The description (FAINT) only shows if it still fits after the label.
-            let label =
-                truncate_for_display_width(&opt.label, inner_width.saturating_sub(3 + box_w));
-            let used = display_width(&label) + 3 + box_w;
+            let prefix_w: usize = prefix
+                .iter()
+                .map(|s| display_width(s.content.as_ref()))
+                .sum();
+            let wrap_w = inner_width.saturating_sub(prefix_w).max(1);
+
+            let mut body = vec![Span::styled(opt.label.clone(), label_style)];
+            if let Some(desc) = &opt.description {
+                body.push(Span::styled(
+                    format!(" — {desc}"),
+                    Style::default().fg(FAINT()),
+                ));
+            }
+            let rows = super::render::wrap_styled_line(&body, wrap_w);
+            let capped = rows.len() > MAX_OPT_ROWS;
+            let mut opt_lines: Vec<Line<'static>> =
+                Vec::with_capacity(rows.len().min(MAX_OPT_ROWS));
+            for (r, row) in rows.into_iter().take(MAX_OPT_ROWS).enumerate() {
+                let mut spans = if r == 0 {
+                    prefix.clone()
+                } else {
+                    vec![Span::raw(" ".repeat(prefix_w))]
+                };
+                if capped && r == MAX_OPT_ROWS - 1 {
+                    // re-truncate so the ellipsis stays inside the width
+                    spans.push(Span::styled(
+                        truncate_for_display_width(&format!("{}…", row.plain), wrap_w),
+                        Style::default().fg(FAINT()),
+                    ));
+                } else {
+                    spans.extend(row.line.spans);
+                }
+                opt_lines.push(Line::from(spans));
+            }
+            groups.push(opt_lines);
+
+            let label = truncate_for_display_width(&opt.label, wrap_w);
+            let used = display_width(&label) + prefix_w;
+            let mut spans = prefix;
             spans.push(Span::styled(label, label_style));
             if let Some(desc) = opt
                 .description
@@ -2016,13 +2056,21 @@ impl CodeTuiApp {
                     Style::default().fg(FAINT()),
                 ));
             }
-            lines.push(Line::from(spans));
+            compact.push(Line::from(spans));
         }
-        if shown < ask.options.len() {
-            lines.push(Line::from(Span::styled(
-                format!("  …{} more", ask.options.len() - shown),
-                Style::default().fg(FAINT()),
-            )));
+
+        let wrapped_total: usize = groups.iter().map(Vec::len).sum();
+        if wrapped_total <= option_budget {
+            lines.extend(groups.into_iter().flatten());
+        } else {
+            let shown = ask.options.len().min(option_budget);
+            lines.extend(compact.into_iter().take(shown));
+            if shown < ask.options.len() {
+                lines.push(Line::from(Span::styled(
+                    format!("  …{} more", ask.options.len() - shown),
+                    Style::default().fg(FAINT()),
+                )));
+            }
         }
         lines.push(Line::from(""));
         lines.push(keys);

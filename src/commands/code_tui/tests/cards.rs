@@ -531,6 +531,93 @@ fn test_ask_card_renders_question_and_options() {
     assert!(screen.contains("select"), "nav hint missing:\n{screen}");
 }
 
+/// A description too long for one row wraps under the label instead of clipping.
+#[test]
+fn test_ask_card_long_description_wraps() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    let (reply, _rx) = tokio::sync::oneshot::channel::<std::result::Result<String, String>>();
+    let desc = "runs the full release checklist including version bump formatting linting and the complete cross platform test matrix before tagging";
+    app.cards.set_ask(PendingAskUser {
+        question: "Release now?".to_string(),
+        options: vec![
+            crate::agent::ask::AskOption {
+                label: "Full release".to_string(),
+                description: Some(desc.to_string()),
+            },
+            crate::agent::ask::AskOption {
+                label: "Dry run".to_string(),
+                description: None,
+            },
+        ],
+        allow_free_text: true,
+        multi_select: false,
+        checked: Vec::new(),
+        selected: 0,
+        reply,
+    });
+    app.history.push(ChatMessage {
+        model: None,
+        role: "assistant".to_string(),
+        content: (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        reasoning_content: None,
+        attachments: vec![],
+    });
+    let (screen, _rows) = render_full_screen(&mut app, 70, 24);
+    // the tail only fits on a wrapped continuation row
+    assert!(
+        screen.contains("before tagging"),
+        "wrapped description tail missing:\n{screen}"
+    );
+    assert!(screen.contains("Dry run"), "option missing:\n{screen}");
+}
+
+/// With no room to wrap, the card falls back to one truncated row per option.
+#[test]
+fn test_ask_card_long_description_compact_fallback() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    let (reply, _rx) = tokio::sync::oneshot::channel::<std::result::Result<String, String>>();
+    let desc = "a very long description that cannot possibly fit on a single row of a narrow card and would need several continuation rows";
+    let options = (1..=4)
+        .map(|i| crate::agent::ask::AskOption {
+            label: format!("option {i}"),
+            description: Some(desc.to_string()),
+        })
+        .collect();
+    app.cards.set_ask(PendingAskUser {
+        question: "Pick one".to_string(),
+        options,
+        allow_free_text: false,
+        multi_select: false,
+        checked: Vec::new(),
+        selected: 0,
+        reply,
+    });
+    app.history.push(ChatMessage {
+        model: None,
+        role: "assistant".to_string(),
+        content: (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        reasoning_content: None,
+        attachments: vec![],
+    });
+    // 12 rows can't hold 4 options × 3 wrapped rows → compact form, trimmed
+    let (screen, _rows) = render_full_screen(&mut app, 60, 12);
+    for i in 1..=3 {
+        assert!(
+            screen.contains(&format!("option {i}")),
+            "option {i} missing in compact fallback:\n{screen}"
+        );
+    }
+    assert!(screen.contains("…1 more"), "trim marker missing:\n{screen}");
+}
+
 /// Multi-select: `space` toggles the highlighted box, arrows move, and Enter
 /// returns the checked labels joined by ", " (not just the highlighted one).
 #[tokio::test]
