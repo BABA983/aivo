@@ -39,17 +39,16 @@ impl LoginCommand {
     async fn execute_internal(&self, args: LoginArgs) -> Result<ExitCode> {
         // Re-verify against the server before deciding we're already logged in:
         // the device may have been unlinked from the dashboard since last time.
-        let relink =
-            match crate::commands::spin(" Checking login status...", sync_account_status()).await {
-                AccountSync::Linked(account) => {
+        let sync = crate::commands::spin(" Checking login status...", sync_account_status()).await;
+        let (relink, current) = match login_preflight(sync, args.reauth) {
+            Preflight::AlreadyLoggedIn { account, verified } => {
+                if verified {
                     println!(
                         "  {} Already logged in as {}.",
                         style::success_symbol(),
                         style::bold(account.display())
                     );
-                    return Ok(ExitCode::Success);
-                }
-                AccountSync::Unverified(Some(account)) => {
+                } else {
                     // Couldn't reach the server; trust the local cache rather than
                     // forcing a re-login on a flaky network.
                     println!(
@@ -58,12 +57,15 @@ impl LoginCommand {
                         style::bold(account.display()),
                         style::dim("(couldn't verify with the server)")
                     );
-                    return Ok(ExitCode::Success);
                 }
-                // Previous link removed: note it in the header, then re-link.
-                AccountSync::Unlinked { had_local: true } => true,
-                AccountSync::Unlinked { had_local: false } | AccountSync::Unverified(None) => false,
-            };
+                println!(
+                    "  {}",
+                    style::dim("Run `aivo login --reauth` to sign in again.")
+                );
+                return Ok(ExitCode::Success);
+            }
+            Preflight::Proceed { relink, current } => (relink, current),
+        };
 
         // Headless (agent shell, CI, both ends piped): nobody can see the code or
         // approve it, so the poll below would just block to expiry. Refuse fast.
@@ -110,6 +112,14 @@ impl LoginCommand {
                 "  {}",
                 style::dim("This device's previous link was removed — signing in again.")
             );
+        } else if let Some(account) = &current {
+            println!(
+                "  {}",
+                style::dim(format!(
+                    "Re-authenticating — currently linked as {}.",
+                    account.display()
+                ))
+            );
         }
         println!(
             "  Confirm this code in your browser:  {}",
@@ -151,7 +161,10 @@ impl LoginCommand {
     }
 
     pub fn print_help() {
-        println!("{} aivo login [--label <LABEL>]", style::bold("Usage:"));
+        println!(
+            "{} aivo login [--label <LABEL>] [--reauth]",
+            style::bold("Usage:")
+        );
         println!();
         println!(
             "{}",
@@ -166,10 +179,62 @@ impl LoginCommand {
             style::cyan(format!("{:<20}", "--label <LABEL>")),
             style::dim("Name for this device in your account's device list")
         );
+        println!(
+            "  {}{}",
+            style::cyan(format!("{:<20}", "--reauth")),
+            style::dim("Sign in again even if this device is already linked")
+        );
         println!();
         println!("{}", style::bold("Examples:"));
         println!("  {}", style::dim("aivo login"));
         println!("  {}", style::dim("aivo login --label \"work laptop\""));
+        println!("  {}", style::dim("aivo login --reauth"));
+    }
+}
+
+/// What `aivo login` should do after reconciling account state, given whether
+/// the user asked to force a fresh sign-in (`--reauth`).
+enum Preflight {
+    /// Device already linked (or trusted from cache) and no re-auth requested.
+    AlreadyLoggedIn {
+        account: account_store::Account,
+        /// Whether the server confirmed the link (vs. trusting the local cache).
+        verified: bool,
+    },
+    /// Run the device flow.
+    Proceed {
+        /// The previous link was removed server-side; noted in the header.
+        relink: bool,
+        /// Account this device is currently linked as, when re-authenticating.
+        current: Option<account_store::Account>,
+    },
+}
+
+fn login_preflight(sync: AccountSync, reauth: bool) -> Preflight {
+    match sync {
+        AccountSync::Linked(account) if !reauth => Preflight::AlreadyLoggedIn {
+            account,
+            verified: true,
+        },
+        AccountSync::Unverified(Some(account)) if !reauth => Preflight::AlreadyLoggedIn {
+            account,
+            verified: false,
+        },
+        AccountSync::Linked(account) | AccountSync::Unverified(Some(account)) => {
+            Preflight::Proceed {
+                relink: false,
+                current: Some(account),
+            }
+        }
+        // Previous link removed: note it in the header, then re-link.
+        AccountSync::Unlinked { had_local } => Preflight::Proceed {
+            relink: had_local,
+            current: None,
+        },
+        AccountSync::Unverified(None) => Preflight::Proceed {
+            relink: false,
+            current: None,
+        },
     }
 }
 
@@ -399,5 +464,73 @@ mod tests {
         assert!(!is_headless(true, false));
         assert!(!is_headless(false, true));
         assert!(!is_headless(true, true));
+    }
+
+    fn account() -> account_store::Account {
+        account_store::Account {
+            user_id: "u1".into(),
+            email: Some("a@b.c".into()),
+            name: None,
+            linked_at: "2026-01-01T00:00:00Z".into(),
+            plan: None,
+            plan_label: None,
+        }
+    }
+
+    #[test]
+    fn preflight_linked_without_reauth_short_circuits() {
+        match login_preflight(AccountSync::Linked(account()), false) {
+            Preflight::AlreadyLoggedIn { verified: true, .. } => {}
+            _ => panic!("expected verified AlreadyLoggedIn"),
+        }
+        match login_preflight(AccountSync::Unverified(Some(account())), false) {
+            Preflight::AlreadyLoggedIn {
+                verified: false, ..
+            } => {}
+            _ => panic!("expected unverified AlreadyLoggedIn"),
+        }
+    }
+
+    #[test]
+    fn preflight_reauth_proceeds_with_current_account() {
+        for sync in [
+            AccountSync::Linked(account()),
+            AccountSync::Unverified(Some(account())),
+        ] {
+            match login_preflight(sync, true) {
+                Preflight::Proceed {
+                    relink: false,
+                    current: Some(_),
+                } => {}
+                _ => panic!("expected Proceed with current account"),
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_unlinked_proceeds_regardless_of_reauth() {
+        for reauth in [false, true] {
+            match login_preflight(AccountSync::Unlinked { had_local: true }, reauth) {
+                Preflight::Proceed {
+                    relink: true,
+                    current: None,
+                } => {}
+                _ => panic!("expected relink Proceed"),
+            }
+            match login_preflight(AccountSync::Unlinked { had_local: false }, reauth) {
+                Preflight::Proceed {
+                    relink: false,
+                    current: None,
+                } => {}
+                _ => panic!("expected fresh Proceed"),
+            }
+            match login_preflight(AccountSync::Unverified(None), reauth) {
+                Preflight::Proceed {
+                    relink: false,
+                    current: None,
+                } => {}
+                _ => panic!("expected fresh Proceed"),
+            }
+        }
     }
 }

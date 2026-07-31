@@ -115,6 +115,10 @@ pub struct LoginArgs {
     /// (default: "aivo <version> on <hostname>").
     #[arg(long, value_name = "LABEL", value_parser = non_empty())]
     pub label: Option<String>,
+
+    /// Sign in again even if this device is already linked
+    #[arg(long)]
+    pub reauth: bool,
 }
 
 /// Arguments for `aivo logout`.
@@ -1912,6 +1916,32 @@ mod tests {
             match a.command {
                 Some(AccountSubcommand::Logout(logout)) => assert!(logout.yes),
                 _ => panic!("Expected Account logout subcommand"),
+            }
+        } else {
+            panic!("Expected Account command");
+        }
+    }
+
+    #[test]
+    fn test_login_reauth_flag() {
+        // Defaults off; parses on both `aivo login` and `aivo account login`.
+        let cli = Cli::try_parse_from(["aivo", "login"]).unwrap();
+        if let Some(Commands::Login(login)) = cli.command {
+            assert!(!login.reauth);
+        } else {
+            panic!("Expected Login command");
+        }
+        let cli = Cli::try_parse_from(["aivo", "login", "--reauth"]).unwrap();
+        if let Some(Commands::Login(login)) = cli.command {
+            assert!(login.reauth);
+        } else {
+            panic!("Expected Login command");
+        }
+        let cli = Cli::try_parse_from(["aivo", "account", "login", "--reauth"]).unwrap();
+        if let Some(Commands::Account(a)) = cli.command {
+            match a.command {
+                Some(AccountSubcommand::Login(login)) => assert!(login.reauth),
+                _ => panic!("Expected Account login subcommand"),
             }
         } else {
             panic!("Expected Account command");
