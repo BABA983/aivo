@@ -237,27 +237,36 @@ impl AgentEngine {
             }
             let base = self.turn_usage.completion_tokens;
             let this: &Self = self;
-            let mut sub_tokens_total = 0u64;
-            // Chunk by the cap so a wide fan-out doesn't stampede the provider: each
-            // chunk runs concurrently (join_all — same primitive as the read batch, and
-            // unlike buffer_unordered it doesn't impose a higher-ranked Send bound on
-            // the heavy sub-engine future), chunks run one after another.
-            for (chunk_no, chunk) in subagent_idx.chunks(SUBAGENT_PARALLEL_CAP).enumerate() {
-                let runs = chunk.iter().enumerate().map(|(j, &i)| {
-                    let args = &tool_calls[i].arguments;
-                    let slot = chunk_no * SUBAGENT_PARALLEL_CAP + j;
-                    let sink = sink.clone().map(|s| (s, slot));
-                    async move { (i, this.run_subagent(ctx, None, sink, base, args).await) }
-                });
-                for (i, res) in futures::future::join_all(runs).await {
-                    outcomes[i] = Some(match res {
-                        Ok((msg, toks)) => {
-                            sub_tokens_total = sub_tokens_total.saturating_add(toks);
-                            Ok(msg)
-                        }
-                        Err(e) => Err(e),
-                    });
+            // Worker pool, not chunked barriers: a shared cursor hands the next
+            // delegate to whichever worker frees up first. join_all over the fixed
+            // worker set avoids buffer_unordered's Send bound on the sub-engine future.
+            let cursor = std::sync::atomic::AtomicUsize::new(0);
+            // Mutex (not RefCell): the turn future must stay Send; locked only between awaits.
+            type DelegateOutcome = (usize, Result<String, String>, u64);
+            let done: std::sync::Mutex<Vec<DelegateOutcome>> =
+                std::sync::Mutex::new(Vec::with_capacity(subagent_idx.len()));
+            let workers = (0..SUBAGENT_PARALLEL_CAP.min(subagent_idx.len())).map(|_| {
+                let (cursor, done, sink, subagent_idx) = (&cursor, &done, &sink, &subagent_idx);
+                async move {
+                    loop {
+                        // Cursor position doubles as the sink slot (row order = call order).
+                        let slot = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(&i) = subagent_idx.get(slot) else {
+                            break;
+                        };
+                        let s = sink.clone().map(|s| (s, slot));
+                        let (res, toks) = this
+                            .run_subagent(ctx, None, s, base, &tool_calls[i].arguments, true)
+                            .await;
+                        done.lock().unwrap().push((i, res, toks));
+                    }
                 }
+            });
+            futures::future::join_all(workers).await;
+            let mut sub_tokens_total = 0u64;
+            for (i, res, toks) in done.into_inner().unwrap() {
+                sub_tokens_total = sub_tokens_total.saturating_add(toks);
+                outcomes[i] = Some(res);
             }
             if let Some(s) = &sink {
                 s.finish();
@@ -329,20 +338,15 @@ impl AgentEngine {
                         .to_string(),
                 )
             } else if n == "subagent" {
-                // Fresh sub-engine on the same serve/cwd; fold its total in. Pass the UI + base so it forwards live token growth.
+                // Fresh sub-engine on the same serve/cwd; tokens fold in even on failure.
                 let base = self.turn_usage.completion_tokens;
-                match self
-                    .run_subagent(ctx, Some(&mut *ui), None, base, &call.arguments)
-                    .await
-                {
-                    Ok((msg, sub_tokens)) => {
-                        extra_tokens += sub_tokens;
-                        self.turn_usage.completion_tokens =
-                            self.turn_usage.completion_tokens.saturating_add(sub_tokens);
-                        Ok(msg)
-                    }
-                    Err(e) => Err(e),
-                }
+                let (res, sub_tokens) = self
+                    .run_subagent(ctx, Some(&mut *ui), None, base, &call.arguments, false)
+                    .await;
+                extra_tokens += sub_tokens;
+                self.turn_usage.completion_tokens =
+                    self.turn_usage.completion_tokens.saturating_add(sub_tokens);
+                res
             } else if n == "take_note" {
                 // Durable scratchpad (deterministic merge, capped oldest-first). Held in the engine, so it runs in the ordered pass.
                 match notes::parse_note(&call.arguments) {
@@ -578,6 +582,9 @@ command in the foreground (drop `background`)."
                 if let Some(k) = tools::read_dedupe_key(n, &call.arguments, ctx.cwd) {
                     repeated_reads.push((k, call.id.clone()));
                 }
+            } else if n == "subagent" {
+                // A failed delegate may still have edited files (step limit mid-work).
+                self.dirty_since_verify = true;
             }
             let raw = match result {
                 Ok(c) => c,

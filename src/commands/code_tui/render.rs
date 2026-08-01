@@ -1838,9 +1838,11 @@ pub(super) fn render_tool_result(
         .then(|| bash_exit_code(result))
         .flatten()
         .filter(|&c| c != 0);
-    // Multi-line "error:" text stays neutral — only a single-line `error: …`
-    // (see `ChatAgentUi`) or a nonzero exit is a real failure.
-    let failed = exit.is_some() || (count <= 1 && result.trim_start().starts_with("error:"));
+    // Multi-line "error:" text stays neutral — except `subagent`, whose failures
+    // are inherently multi-line and whose `error:` prefix is structural (ChatAgentUi
+    // adds it only on Err); a failed delegate must never read as green.
+    let prefix_err = result.trim_start().starts_with("error:");
+    let failed = exit.is_some() || (prefix_err && (count <= 1 || tool == Some("subagent")));
     let summary_color = if failed { ERROR() } else { FAINT() };
     let mut spans = vec![Span::styled(
         "  ⎿ ".to_string(),

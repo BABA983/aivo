@@ -217,6 +217,8 @@ facts derivable from the code, or secrets.\n\n\
 For a large, self-contained chunk of work — a deep investigation that would clutter your context, or \
 something a stronger model should handle — you can hand it to a fresh sub-agent with `subagent` (pass \
 `model` to use a stronger model) and build on its result. For ordinary steps, just use your own tools. \
+Delegate only genuinely independent work: you own integrating what comes back and verifying the final \
+result — a delegate's report is a claim, not proof. \
 A sub-agent's report may be saved to a file (its result says where) — re-read that file with \
 `read_file` instead of re-running the investigation if the result has been cleared from context."
     );

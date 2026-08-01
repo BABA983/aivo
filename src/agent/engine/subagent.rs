@@ -91,9 +91,12 @@ impl AgentEngine {
     /// `subagent`, same cwd + serve, optionally a stronger model), run to convergence,
     /// return its answer. Capturing UI (only the result surfaces). Dangerous ops inherit
     /// the parent's auto-approve, else fail closed (no nested prompt).
-    /// Run one sub-agent to completion and hand back `(result, tokens)`. `parent_ui`
-    /// `Some` streams its activity to the parent (the lone-sub-agent path); `None`
-    /// buffers silently, so several can run concurrently without sharing the UI.
+    /// Run one sub-agent to completion and hand back `(result, tokens)` — tokens
+    /// even on `Err`, they were spent. `parent_ui` `Some` streams its activity to
+    /// the parent (the lone-sub-agent path); `None` buffers silently, so several
+    /// can run concurrently without sharing the UI. `require_isolation` (parallel
+    /// batches): a delegate that asked for a worktree fails instead of falling
+    /// back to the shared workspace, where concurrent writers would collide.
     pub(super) async fn run_subagent(
         &self,
         ctx: &TurnCtx<'_>,
@@ -101,7 +104,8 @@ impl AgentEngine {
         sink: Option<(std::sync::Arc<dyn SubagentSink>, usize)>,
         base: u64,
         args: &Value,
-    ) -> Result<(String, u64), String> {
+        require_isolation: bool,
+    ) -> (Result<String, String>, u64) {
         // Fallback keys are Claude Code's names, so a Task-vocabulary call still delegates.
         let str_arg = |keys: &[&str]| {
             keys.iter().find_map(|k| {
@@ -111,8 +115,16 @@ impl AgentEngine {
                     .filter(|t| !t.is_empty())
             })
         };
-        let task =
-            str_arg(&["task", "prompt"]).ok_or_else(|| "subagent: missing `task`".to_string())?;
+        // Early failures still mark the live row ✗ — a silent clear reads as success.
+        let fail_early = |e: String| {
+            if let Some((s, slot)) = &sink {
+                s.done(*slot, false, 0, 0);
+            }
+            (Err(e), 0u64)
+        };
+        let Some(task) = str_arg(&["task", "prompt"]) else {
+            return fail_early("subagent: missing `task`".to_string());
+        };
         // Named specialist if `agent` matches — resolved fresh from disk (see
         // `resolve_profile`), so a profile authored this turn delegates correctly.
         // Unknown names fall back to generic (lenient, don't fail the turn) but
@@ -143,6 +155,13 @@ impl AgentEngine {
                     guard = Some(subagents::WorktreeGuard::new(ctx.cwd, &wt));
                 }
                 Err(why) => {
+                    if require_isolation {
+                        return fail_early(format!(
+                            "subagent: worktree isolation was requested but is unavailable \
+({why}) — refusing to run this delegate in the shared workspace alongside parallel delegates. \
+Fix the repo state or run it alone."
+                        ));
+                    }
                     isolation_note = Some(format!(
                         "\n\n[worktree isolation] unavailable ({why}); ran in the shared workspace."
                     ));
@@ -192,10 +211,17 @@ impl AgentEngine {
         if let Some(hooks) = &self.hooks {
             sub.set_hooks(std::sync::Arc::new(hooks.without_stop()));
         }
-        // Carry the parent's reasoning effort — but only if it's valid for the sub's model (may differ), else keep the sub's default.
-        if let Some(effort) = &self.reasoning_effort
-            && crate::services::model_metadata::snapshot_limits(model)
-                .is_some_and(|c| c.reasoning_efforts.iter().any(|l| l == effort))
+        // Profile effort beats the parent's inherited one; each only if valid for
+        // the sub's model (may differ), else the sub's default.
+        let effort_valid = |e: &String| {
+            crate::services::model_metadata::snapshot_limits(model)
+                .is_some_and(|c| c.reasoning_efforts.iter().any(|l| l == e))
+        };
+        if let Some(effort) = profile
+            .as_ref()
+            .and_then(|p| p.effort.as_ref())
+            .filter(|e| effort_valid(e))
+            .or_else(|| self.reasoning_effort.as_ref().filter(|e| effort_valid(e)))
         {
             sub.set_reasoning_effort(effort.clone());
         }
@@ -238,6 +264,7 @@ impl AgentEngine {
         if let Some((s, slot)) = &ui.sink {
             s.done(*slot, !ui.answer().is_empty(), ui.steps, ui.tokens);
         }
+        let failed = ui.answer().is_empty();
         let mut msg = ui.result_message();
         if let Some(g) = guard {
             msg.push_str(&g.finalize());
@@ -255,7 +282,7 @@ user config); check the filename / `name:` frontmatter."
         }
         // A failed run on a model aivo's catalog doesn't know is most often a bad
         // profile `model:` — name the likely cause instead of a bare empty result.
-        if ui.answer().is_empty()
+        if failed
             && model != self.model
             && crate::services::model_metadata::snapshot_limits(model).is_none()
         {
@@ -264,6 +291,10 @@ user config); check the filename / `name:` frontmatter."
 run failed at the provider, fix the profile's `model:` (use a full model id) or omit \
 it to inherit yours."
             ));
+        }
+        // No answer = failed delegation — Err, never a green success.
+        if failed {
+            return (Err(msg), ui.tokens);
         }
         // Gate on the STORED length (not the bare answer) so the tail can't push it over
         // the clear threshold and get cleared without a pointer.
@@ -278,7 +309,7 @@ it to inherit yours."
                 path.display()
             ));
         }
-        Ok((msg, ui.tokens))
+        (Ok(msg), ui.tokens)
     }
 
     /// Write a sub-agent report (`sub-<seq>-<slug>.md`); `None` on IO failure (never fails the turn).
@@ -371,7 +402,8 @@ sub-agent does not see this conversation, so make `task` complete and standalone
 further sub-agents. Call `subagent` several times in one turn to run independent investigations in \
 parallel — they execute concurrently and each result comes back separately; give parallel delegates \
 that edit files `isolation: \"worktree\"` so they can't clobber each other. Always pass a short \
-`label` so the user can follow each delegate's progress."
+`label` so the user can follow each delegate's progress. Use delegation only for genuinely \
+independent work — you own integration and final verification of everything a delegate hands back."
         .to_string();
     if !subagents.is_empty() {
         let names: Vec<&str> = subagents.iter().map(|s| s.name.as_str()).collect();

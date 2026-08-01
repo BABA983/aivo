@@ -10,6 +10,8 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub(super) struct CapturingUi {
     pub(super) tools: Vec<String>,
+    /// Tool names whose result came back `Err` (failure rendering), in order.
+    pub(super) tool_errors: Vec<String>,
     pub(super) text: String,
     pub(super) notices: Vec<String>,
     /// `notify_error` notices, separate so tests can assert the channel.
@@ -53,7 +55,11 @@ impl AgentUi for CapturingUi {
     fn tool_start(&mut self, name: &str, _: &Value) {
         self.tools.push(name.to_string());
     }
-    fn tool_result(&mut self, _: &str, _: &Result<String, String>) {}
+    fn tool_result(&mut self, name: &str, r: &Result<String, String>) {
+        if r.is_err() {
+            self.tool_errors.push(name.to_string());
+        }
+    }
     fn notify(&mut self, t: &str) {
         self.notices.push(t.to_string());
     }
@@ -228,6 +234,7 @@ pub(super) fn subagent(name: &str, model: Option<&str>, tools: Option<Vec<&str>>
         name: name.to_string(),
         description: format!("the {name} specialist"),
         model: model.map(str::to_string),
+        effort: None,
         tools: tools.map(|t| t.into_iter().map(str::to_string).collect()),
         body: format!("You are {name}. Follow the {name} playbook."),
         isolation_worktree: false,

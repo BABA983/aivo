@@ -336,6 +336,7 @@ fn test_at_mention_menu_completes_subagent_names() {
         name: name.to_string(),
         description: format!("{name} does things. Extra sentence."),
         model: None,
+        effort: None,
         tools: None,
         body: String::new(),
         isolation_worktree: false,

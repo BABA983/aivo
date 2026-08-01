@@ -227,6 +227,76 @@ async fn subagent_worktree_isolation_keeps_parent_tree_clean() {
         .output();
 }
 
+/// A delegate that converges with no answer surfaces as a FAILED tool result
+/// (red in the UI), not a green success wrapping "(no answer)".
+#[tokio::test]
+async fn subagent_no_answer_is_a_failed_tool_result() {
+    let dir = tmp();
+    let call = tool_call_sse("subagent", json!({"task": "do a thing"}));
+    let port = spawn_sse_sequence(vec![
+        call,
+        "data: [DONE]\n\n".to_string(), // sub converges with no text at all
+        FINAL_TEXT_SSE.to_string(),
+    ]);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let mut engine = AgentEngine::new(&dir.display().to_string(), "m", "", &[], &[], 0, 0);
+    let mut ui = CapturingUi::default();
+    run_session(
+        &mut engine,
+        &turn_ctx(&client, &base, &dir),
+        Some("delegate it".into()),
+        &mut ui,
+    )
+    .await;
+    assert_eq!(ui.tool_errors, vec!["subagent"], "must render as a failure");
+    let texts = tool_result_texts(&engine);
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("without a textual answer") || t.contains("no answer")),
+        "failure reason missing from history: {texts:?}"
+    );
+}
+
+/// In a parallel batch, a delegate that asked for worktree isolation FAILS when
+/// isolation is unavailable — never a silent fallback that would put concurrent
+/// writers in the same tree. (A lone delegate still falls back with a note.)
+#[tokio::test]
+async fn parallel_subagents_refuse_shared_workspace_when_isolation_unavailable() {
+    let dir = tmp(); // not a git repo → create_worktree fails
+    let batch = batch_tool_call_sse(&[
+        (
+            "c1",
+            "subagent",
+            json!({"task": "edit a", "isolation": "worktree"}),
+        ),
+        (
+            "c2",
+            "subagent",
+            json!({"task": "edit b", "isolation": "worktree"}),
+        ),
+    ]);
+    let port = spawn_sse_sequence(vec![batch, FINAL_TEXT_SSE.to_string()]);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://127.0.0.1:{port}");
+    let mut engine = AgentEngine::new(&dir.display().to_string(), "m", "", &[], &[], 0, 0);
+    let mut ui = CapturingUi::default();
+    run_session(
+        &mut engine,
+        &turn_ctx(&client, &base, &dir),
+        Some("delegate both".into()),
+        &mut ui,
+    )
+    .await;
+    let results = tool_result_texts(&engine);
+    let refused = results
+        .iter()
+        .filter(|t| t.contains("refusing to run this delegate"))
+        .count();
+    assert_eq!(refused, 2, "both delegates must refuse: {results:?}");
+}
+
 /// Isolation requested outside a git repo falls back to the shared workspace
 /// with a note, rather than failing the delegation.
 #[tokio::test]

@@ -2,6 +2,7 @@
 name: explorer
 description: Read-only codebase exploration to find files, symbols, callers, and how things work, whenever answering needs multi-step searching.
 tools: [read_file, grep, glob, list_dir]
+effort: low
 ---
 
 # Explorer

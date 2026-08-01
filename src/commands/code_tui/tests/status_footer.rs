@@ -607,6 +607,7 @@ fn subagent_done_attributes_only_discovered_profiles() {
         name: name.to_string(),
         description: String::new(),
         model: None,
+        effort: None,
         tools: None,
         body: String::new(),
         isolation_worktree: false,
