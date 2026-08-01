@@ -3188,9 +3188,9 @@ pub(super) struct CodeTuiApp {
     /// an older generation is dropped, so a connect launched before a toggle can't
     /// resurrect a just-disabled server.
     pub(super) mcp_connect_gen: u64,
-    /// Tool set changed mid-turn (MCP connect, skill/MCP toggles) — rebuild the
-    /// engine at turn end; a mid-turn drop loses usage + durable transcript.
-    pub(super) engine_rebuild_pending: bool,
+    /// Tool set changed — rebuild the engine at the next turn. Kept (not
+    /// dropped) so the rebuild exports its conversation + rewind checkpoints.
+    pub(super) engine_stale: bool,
     /// HTTP MCP servers added this session (name → url) to auto-authorize once
     /// their connect reports a 401 — so adding an OAuth server is one step, not a
     /// separate Ctrl+O. Drained when that connect resolves.
@@ -3655,7 +3655,7 @@ impl CodeTuiApp {
             mcp_connect_progress: std::collections::HashMap::new(),
             disabled_mcp_tools: std::collections::HashSet::new(),
             mcp_connect_gen: 0,
-            engine_rebuild_pending: false,
+            engine_stale: false,
             pending_mcp_auth: std::collections::HashMap::new(),
             agent_serve: None,
             cards: AgentCards::default(),

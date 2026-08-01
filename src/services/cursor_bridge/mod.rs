@@ -714,8 +714,15 @@ where
     ensure_session_open(&mut guard, state, requested_model.as_deref()).await?;
     let session = guard.as_mut().expect("session opened above");
 
-    if let Some(model) = &requested_model {
-        let _ = session.set_model(model).await;
+    if let Some(model) = &requested_model
+        && let Err(e) = apply_requested_model(session, model).await
+    {
+        // Transport failure = dead child, evict; a catalog miss leaves the
+        // session healthy.
+        if e.downcast_ref::<ModelNotFound>().is_none() {
+            *guard = None;
+        }
+        return Err(e);
     }
 
     if !image_blocks.is_empty() && !session.supports_image_prompts() {
@@ -784,11 +791,47 @@ pub(crate) fn is_client_disconnect(err: &anyhow::Error) -> bool {
     })
 }
 
-/// True for a malformed request body (JSON that didn't parse) — map to 400 so
-/// SDKs fail fast instead of retry-looping on a 5xx.
+/// Requested model matched nothing in the live session's catalog — 400, since
+/// the alternative is answering on whatever model the pooled session last used.
+#[derive(Debug)]
+pub(crate) struct ModelNotFound(pub(crate) String);
+
+impl std::fmt::Display for ModelNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "model \"{}\" isn't available on this cursor account; \
+             GET /v1/models lists the valid ids",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ModelNotFound {}
+
+/// Switch the live session to `requested`, failing on a catalog miss instead of
+/// silently serving the session's previous model. `auto`/sentinel stay
+/// best-effort — they mean "let cursor pick".
+pub(crate) async fn apply_requested_model(
+    session: &mut CursorAcpSession,
+    requested: &str,
+) -> Result<()> {
+    if session.set_model(requested).await? {
+        return Ok(());
+    }
+    if requested == CURSOR_ACP_SENTINEL || requested.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(ModelNotFound(requested.to_string())))
+}
+
+/// True for a request the client should fix rather than retry (malformed JSON,
+/// unknown model) — 400 so SDKs fail fast instead of retry-looping on a 5xx.
 fn is_bad_request(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| cause.downcast_ref::<serde_json::Error>().is_some())
+    err.chain().any(|cause| {
+        cause.downcast_ref::<serde_json::Error>().is_some()
+            || cause.downcast_ref::<ModelNotFound>().is_some()
+    })
 }
 
 /// Resolves the status code logged for a failed turn. Broken pipes get 499

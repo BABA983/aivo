@@ -841,23 +841,10 @@ impl CodeTuiApp {
         self.request_engine_rebuild();
     }
 
-    /// Drop the engine so the next turn rebuilds with the changed tool set —
-    /// deferred mid-turn (an immediate drop skips `take_turn_usage` + persist).
+    /// Mark the engine stale so the next turn rebuilds with the changed tool
+    /// set; kept alive until then so the rebuild can export its state.
     pub(super) fn request_engine_rebuild(&mut self) {
-        if self.sending {
-            self.engine_rebuild_pending = true;
-        } else {
-            self.agent_engine = None;
-        }
-    }
-
-    /// The deferred half of [`Self::request_engine_rebuild`], run after a turn
-    /// finishes.
-    pub(super) fn maybe_apply_engine_rebuild(&mut self) {
-        if self.engine_rebuild_pending {
-            self.engine_rebuild_pending = false;
-            self.agent_engine = None;
-        }
+        self.engine_stale = true;
     }
 
     /// A turn-level agent error: the transient notice, plus a durable `error`
@@ -1059,9 +1046,6 @@ impl CodeTuiApp {
             }
             self.session_tokens = self.session_tokens.merge(turn);
         }
-        // If the tool set changed mid-turn, drop the engine now so the next turn
-        // rebuilds with it (must happen while not sending).
-        self.maybe_apply_engine_rebuild();
         // Capture a drafted plan before the persist (and before a queued message
         // flips `sending`) so it rides this turn-end save.
         self.capture_plan_draft();

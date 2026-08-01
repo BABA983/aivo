@@ -2816,8 +2816,8 @@ fn render_detail_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line>, scro
     scroll
 }
 
-/// Greedy word-wrap to `width` display columns (for error text / descriptions in
-/// a drill-in). A single word wider than `width` overflows rather than splitting.
+/// Greedy word-wrap to `width` display columns (for error text / descriptions
+/// in a drill-in); a word wider than `width` (e.g. spaceless CJK) hard-breaks.
 pub(super) fn wrap_chars(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return Vec::new();
@@ -2835,8 +2835,20 @@ pub(super) fn wrap_chars(text: &str, width: usize) -> Vec<String> {
             cur.push(' ');
             w += 1;
         }
-        cur.push_str(word);
-        w += ww;
+        if ww > width {
+            for c in word.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(0).max(1);
+                if w > 0 && w + cw > width {
+                    out.push(std::mem::take(&mut cur));
+                    w = 0;
+                }
+                cur.push(c);
+                w += cw;
+            }
+        } else {
+            cur.push_str(word);
+            w += ww;
+        }
     }
     if !cur.is_empty() {
         out.push(cur);

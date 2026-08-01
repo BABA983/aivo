@@ -309,6 +309,37 @@ fn test_wrap_styled_line_word_wraps_and_hard_breaks() {
 }
 
 #[test]
+fn test_wrap_chars_hard_breaks_spaceless_cjk() {
+    use super::super::overlay_render_impl::wrap_chars;
+    use unicode_width::UnicodeWidthStr;
+
+    // A spaceless CJK run is one "word": must hard-break, not overflow.
+    let cjk = "这是一段没有空格的中文描述文本用来验证换行";
+    let rows = wrap_chars(cjk, 10);
+    assert!(rows.len() > 1, "CJK run stayed one overlong row: {rows:?}");
+    for r in &rows {
+        assert!(r.width() <= 10, "row exceeds width: {r:?}");
+    }
+    let joined: String = rows.concat();
+    assert_eq!(joined, cjk, "characters lost while wrapping");
+
+    let mixed = "error 上游服务不可用请稍后重试 retry";
+    let rows = wrap_chars(mixed, 8);
+    for r in &rows {
+        assert!(r.width() <= 8, "row exceeds width: {r:?}");
+    }
+    let rejoined: String = rows
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        rejoined,
+        mixed.split_whitespace().collect::<Vec<_>>().join("")
+    );
+}
+
+#[test]
 fn test_long_reply_scrolls_to_show_last_line() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;

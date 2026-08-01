@@ -328,7 +328,7 @@ pub(super) async fn run_gemini_bridged_fresh(
     };
     let bridge_id = { bridge_session.lock().await.id.clone() };
 
-    if let Err(e) = acp.set_model(&model).await {
+    if let Err(e) = super::apply_requested_model(&mut acp, &model).await {
         state.mcp_bridge.drop_session(&bridge_id).await;
         return Err(e).context("cursor-agent set_model");
     }

@@ -778,13 +778,15 @@ impl CodeTuiApp {
             self.real_cwd.clone()
         };
 
-        // Rebuild the engine when absent or when the key/model changed; otherwise
-        // reuse it so multi-turn context carries over.
-        let need_new = self
-            .agent_engine
-            .as_ref()
-            .is_none_or(|s| s.key_id != self.key.id || s.model != self.model);
+        // Rebuild the engine when absent, stale (tool-set change), or when the
+        // key/model changed; otherwise reuse it so multi-turn context carries over.
+        let need_new = self.engine_stale
+            || self
+                .agent_engine
+                .as_ref()
+                .is_none_or(|s| s.key_id != self.key.id || s.model != self.model);
         if need_new {
+            self.engine_stale = false;
             // Snapshot the outgoing engine's transcript before replacing it, so a
             // model switch rebuilds from the exact prior messages (ids intact), not
             // the lossy display seed. Empty after /new or key switch (they clear

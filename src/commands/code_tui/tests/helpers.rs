@@ -215,6 +215,16 @@ pub(super) fn test_screen(terminal: &ratatui::Terminal<ratatui::backend::TestBac
     screen
 }
 
+pub(super) fn dummy_agent_session() -> super::super::AgentSession {
+    super::super::AgentSession {
+        key_id: "k".to_string(),
+        model: "m".to_string(),
+        engine: std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::agent::engine::AgentEngine::new("/tmp", "m", "", &[], &[], 0, 0),
+        )),
+    }
+}
+
 pub(super) fn one_user_message(
     content: &str,
 ) -> Vec<crate::services::session_store::StoredChatMessage> {

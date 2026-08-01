@@ -2,27 +2,22 @@ use super::super::*;
 use super::helpers::*;
 use tempfile::TempDir;
 
-/// Mid-turn tool-set changes (skill/MCP toggles, async skill installs) defer the
-/// engine drop to turn end — an immediate drop loses the turn's usage + transcript.
+/// Tool-set changes mark the engine stale instead of dropping it, mid-turn or idle.
 #[test]
-fn test_request_engine_rebuild_defers_while_sending() {
+fn test_request_engine_rebuild_marks_stale_and_keeps_engine() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
 
+    app.agent_engine = Some(dummy_agent_session());
     app.sending = true;
     app.request_engine_rebuild();
-    assert!(
-        app.engine_rebuild_pending,
-        "deferred while a turn is in flight"
-    );
+    assert!(app.engine_stale, "marked stale while a turn is in flight");
+    assert!(app.agent_engine.is_some(), "engine kept for export");
 
     app.sending = false;
-    app.maybe_apply_engine_rebuild();
-    assert!(!app.engine_rebuild_pending, "applied at turn end");
-
-    // Idle: applies immediately, no pending flag.
     app.request_engine_rebuild();
-    assert!(!app.engine_rebuild_pending);
+    assert!(app.engine_stale, "marked stale while idle too");
+    assert!(app.agent_engine.is_some(), "engine kept for export");
 }
 
 /// A non-UTF8 file under a text mime (unknown extension) is refused with a clear

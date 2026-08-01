@@ -1929,19 +1929,75 @@ fn pick_model_id_from_models(
     };
 
     let available = models.get("availableModels").and_then(Value::as_array)?;
-    if preference == ModelPickPreference::PreferNoThinking
-        && let Some(id) = pick_prefer_no_thinking(available, requested)
-    {
+    let pick = |candidate: &str| -> Option<String> {
+        if preference == ModelPickPreference::PreferNoThinking
+            && let Some(id) = pick_prefer_no_thinking(available, candidate)
+        {
+            return Some(id);
+        }
+        for entry in available {
+            let name = entry.get("name").and_then(Value::as_str);
+            let id = entry.get("modelId").and_then(Value::as_str);
+            if name == Some(candidate) || id == Some(candidate) {
+                return id.map(str::to_string);
+            }
+        }
+        None
+    };
+    if let Some(id) = pick(requested) {
         return Some(id);
     }
-    for entry in available {
-        let name = entry.get("name").and_then(Value::as_str);
-        let id = entry.get("modelId").and_then(Value::as_str);
-        if name == Some(requested) || id == Some(requested) {
-            return id.map(str::to_string);
+    model_match_fallbacks(requested)
+        .iter()
+        .find_map(|cand| pick(cand))
+}
+
+/// Strip a trailing `-YYYYMMDD` snapshot date; cursor's catalog is undated.
+fn strip_dated_suffix(id: &str) -> Option<&str> {
+    let (base, tail) = id.rsplit_once('-')?;
+    (!base.is_empty() && tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+        .then_some(base)
+}
+
+/// Inverse of [`reorder_claude_version_first`]: `claude-opus-4-8` → `claude-4-8-opus`.
+fn reorder_claude_family_first(base: &str) -> Option<String> {
+    let rest = base.strip_prefix("claude-")?;
+    for family in ["opus", "sonnet", "haiku"] {
+        if let Some(version) = rest.strip_prefix(family).and_then(|p| p.strip_prefix('-')) {
+            return Some(format!("claude-{version}-{family}"));
         }
     }
     None
+}
+
+/// Aliases to retry on a verbatim catalog miss: dated ids undated, tier slugs
+/// (printed by `cursor-agent models` but absent from `availableModels`) reduced
+/// to their base (`-thinking` variant first), claude spellings both orderings.
+/// Most- to least-specific; the requested id itself is excluded (already tried).
+fn model_match_fallbacks(requested: &str) -> Vec<String> {
+    let mut cands: Vec<String> = Vec::new();
+    let undated = strip_dated_suffix(requested).map(str::to_string);
+    cands.extend(undated.clone());
+    for root in std::iter::once(requested).chain(undated.as_deref()) {
+        let parts = parse_cursor_model(root);
+        if parts.thinking {
+            cands.push(format!("{}-thinking", parts.base));
+        }
+        cands.push(parts.base);
+    }
+    for cand in cands.clone() {
+        cands.extend(reorder_claude_version_first(&cand));
+        cands.extend(reorder_claude_family_first(&cand));
+    }
+    cands.extend(reorder_claude_version_first(requested));
+    cands.extend(reorder_claude_family_first(requested));
+    let mut out: Vec<String> = Vec::new();
+    for cand in cands {
+        if cand != requested && !out.contains(&cand) {
+            out.push(cand);
+        }
+    }
+    out
 }
 
 fn model_id_prefers_no_thinking(model_id: &str) -> bool {
@@ -2789,6 +2845,102 @@ mod tests {
             )
             .as_deref(),
             Some("composer-2.5[fast=true]")
+        );
+    }
+
+    #[test]
+    fn pick_model_id_resolves_tier_suffixed_slug_to_base() {
+        // Tier slugs must resolve to the bare base, not miss (and silently
+        // serve the session's old model).
+        let models = serde_json::json!({
+            "currentModelId": "gpt-5.6-sol",
+            "availableModels": [
+                {"modelId": "gpt-5.6-sol", "name": "gpt-5.6-sol"},
+                {"modelId": "claude-opus-4-8", "name": "claude-opus-4-8"},
+            ],
+        });
+        assert_eq!(
+            pick_model_id_from_models(
+                &models,
+                Some("claude-opus-4-8-xhigh"),
+                ModelPickPreference::Default
+            )
+            .as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn pick_model_id_resolves_dated_anthropic_id() {
+        let models = serde_json::json!({
+            "currentModelId": "gpt-5.6-sol",
+            "availableModels": [
+                {"modelId": "claude-opus-4-8", "name": "claude-opus-4-8"},
+            ],
+        });
+        assert_eq!(
+            pick_model_id_from_models(
+                &models,
+                Some("claude-opus-4-8-20260115"),
+                ModelPickPreference::Default
+            )
+            .as_deref(),
+            Some("claude-opus-4-8")
+        );
+    }
+
+    #[test]
+    fn pick_model_id_swaps_claude_family_and_version_order() {
+        // Family-first request against a version-first catalog name and back.
+        let models = serde_json::json!({
+            "currentModelId": "claude-4-6-opus",
+            "availableModels": [
+                {"modelId": "claude-4-6-opus", "name": "claude-4-6-opus"},
+            ],
+        });
+        assert_eq!(
+            pick_model_id_from_models(
+                &models,
+                Some("claude-opus-4-6"),
+                ModelPickPreference::Default
+            )
+            .as_deref(),
+            Some("claude-4-6-opus")
+        );
+        let models = serde_json::json!({
+            "currentModelId": "claude-opus-4-6",
+            "availableModels": [
+                {"modelId": "claude-opus-4-6", "name": "claude-opus-4-6"},
+            ],
+        });
+        assert_eq!(
+            pick_model_id_from_models(
+                &models,
+                Some("claude-4-6-opus-20260115"),
+                ModelPickPreference::Default
+            )
+            .as_deref(),
+            Some("claude-opus-4-6")
+        );
+    }
+
+    #[test]
+    fn pick_model_id_tier_strip_keeps_thinking_variant_first() {
+        let models = serde_json::json!({
+            "currentModelId": "claude-opus-4-8",
+            "availableModels": [
+                {"modelId": "claude-opus-4-8", "name": "claude-opus-4-8"},
+                {"modelId": "claude-opus-4-8[thinking=true]", "name": "claude-opus-4-8-thinking"},
+            ],
+        });
+        assert_eq!(
+            pick_model_id_from_models(
+                &models,
+                Some("claude-opus-4-8-thinking-xhigh"),
+                ModelPickPreference::Default
+            )
+            .as_deref(),
+            Some("claude-opus-4-8[thinking=true]")
         );
     }
 

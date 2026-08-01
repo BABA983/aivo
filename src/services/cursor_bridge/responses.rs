@@ -564,7 +564,7 @@ async fn setup_bridged_session_for_responses(
     let bridge_id = { bridge_session.lock().await.id.clone() };
 
     if let Some(model) = &requested_model
-        && let Err(e) = acp.set_model(model).await
+        && let Err(e) = super::apply_requested_model(&mut acp, model).await
     {
         state.mcp_bridge.drop_session(&bridge_id).await;
         return Err(e).context("cursor-agent set_model");

@@ -18,16 +18,6 @@ fn bare_url_in_mcp_add_becomes_url_config() {
     assert!(bare_url_to_config(r#"{"url":"https://h"}"#).is_none());
 }
 
-fn dummy_agent_session() -> AgentSession {
-    AgentSession {
-        key_id: "k".to_string(),
-        model: "m".to_string(),
-        engine: std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::agent::engine::AgentEngine::new("/tmp", "m", "", &[], &[], 0, 0),
-        )),
-    }
-}
-
 #[tokio::test]
 async fn test_apply_mcp_connected_empty_keeps_engine() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -48,7 +38,7 @@ async fn test_apply_mcp_connected_empty_keeps_engine() {
         app.agent_engine.is_some(),
         "an empty MCP result must not drop the engine"
     );
-    assert!(!app.engine_rebuild_pending);
+    assert!(!app.engine_stale);
 }
 
 #[tokio::test]
@@ -181,21 +171,17 @@ async fn test_stale_mcp_connect_is_dropped() {
 }
 
 #[test]
-fn test_maybe_apply_engine_rebuild_drops_engine_when_pending() {
+fn test_request_engine_rebuild_keeps_engine_for_state_export() {
+    // Regression: dropping the engine here lost transcript + rewind checkpoints.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
     app.agent_engine = Some(dummy_agent_session());
-    app.engine_rebuild_pending = true;
-    app.maybe_apply_engine_rebuild();
+    app.request_engine_rebuild();
+    assert!(app.engine_stale, "flag should set");
     assert!(
-        app.agent_engine.is_none(),
-        "pending rebuild should drop engine"
+        app.agent_engine.is_some(),
+        "engine must survive until the rebuild can export its state"
     );
-    assert!(!app.engine_rebuild_pending, "flag should clear");
-    // Not pending → engine left alone.
-    app.agent_engine = Some(dummy_agent_session());
-    app.maybe_apply_engine_rebuild();
-    assert!(app.agent_engine.is_some());
 }
 
 #[tokio::test]
