@@ -45,6 +45,7 @@ fn state_with_models(models: Vec<&str>) -> Arc<RouterState> {
             prewarm_count: 0,
             mcp_prewarm_id_style: None,
             expected_token: None,
+            model_only: false,
         },
         cached_models: Mutex::new(Some(models.into_iter().map(String::from).collect())),
         mcp_bridge: McpBridge::for_tests(),
@@ -115,6 +116,7 @@ async fn start_on_listener_serves_probe_on_caller_bound_port() {
         prewarm_count: 0,
         mcp_prewarm_id_style: None,
         expected_token: None,
+        model_only: false,
     });
     let handle = router.start_on_listener(listener).await.unwrap();
 
@@ -212,6 +214,7 @@ async fn cached_models_serves_from_disk_cache_without_spawning_cursor_agent() {
             prewarm_count: 0,
             mcp_prewarm_id_style: None,
             expected_token: None,
+            model_only: false,
         },
         // In-memory cache deliberately empty so the lookup falls through
         // to the disk-backed branch.
@@ -2001,4 +2004,26 @@ fn malformed_request_body_maps_to_400_not_502() {
     // An upstream failure with no serde error in the chain stays 502.
     let upstream = anyhow::anyhow!("cursor-agent session/prompt failed");
     assert_eq!(status_for_handler_error(&upstream), 502);
+}
+
+#[test]
+fn model_only_prompt_prefixes_only_when_enabled() {
+    let mut config = CursorRouterConfig {
+        key: fake_key(),
+        workspace_cwd: "/tmp".to_string(),
+        models_cache: None,
+        prewarm_count: 0,
+        mcp_prewarm_id_style: None,
+        expected_token: None,
+        model_only: true,
+    };
+    let _env = crate::services::cursor_acp::ALLOW_TOOLS_ENV_TEST_LOCK.blocking_lock();
+    // SAFETY: serialized by the lock above.
+    unsafe { std::env::remove_var(cursor_acp::CURSOR_ALLOW_TOOLS_ENV) };
+    let prefixed = model_only_prompt(&config, "User: hi");
+    assert!(prefixed.starts_with("[aivo bridge]"));
+    assert!(prefixed.ends_with("User: hi"));
+
+    config.model_only = false;
+    assert_eq!(model_only_prompt(&config, "User: hi"), "User: hi");
 }

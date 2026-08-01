@@ -313,6 +313,7 @@ pub(super) async fn run_gemini_bridged_fresh(
             Some(&model),
             &state.config.workspace_cwd,
             Some(&mcp_url),
+            super::model_only_active(&state.config),
         )
         .await
         .context("open cursor-agent ACP session with MCP bridge (gemini)");
@@ -341,6 +342,7 @@ pub(super) async fn run_gemini_bridged_fresh(
         .map(str::to_string)
         .unwrap_or_else(|| model.clone());
 
+    let prompt = super::model_only_prompt(&state.config, &prompt);
     let blocks = cursor_acp::assemble_prompt_blocks(&prompt, image_blocks);
     let stream = match acp.prompt_with_blocks(blocks).await {
         Ok(s) => s,

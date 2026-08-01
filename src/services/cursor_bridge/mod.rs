@@ -73,6 +73,40 @@ pub struct CursorRouterConfig {
     /// with the `aivo-cursor` placeholder); the plugin endpoint sets it so the
     /// loopback proxy is bearer-gated like the plain-key `ServeRouter`.
     pub expected_token: Option<String>,
+    /// Reject cursor-agent's native tool permissions and prepend
+    /// [`MODEL_ONLY_PREAMBLE`] to every prompt. Set by `aivo serve`: its
+    /// callers are remote, so native tools would mutate the *server's*
+    /// filesystem. MCP-bridged client tools still execute client-side;
+    /// `AIVO_CURSOR_ALLOW_TOOLS=1` restores the old agentic behavior.
+    pub model_only: bool,
+}
+
+/// Steers the model off its (permission-rejected) native tools and toward
+/// the MCP-bridged client tools.
+const MODEL_ONLY_PREAMBLE: &str = "[aivo bridge] This session is a remote model \
+backend: the workspace, filesystem, and shell your built-in tools reach belong \
+to the server, not to the person you are assisting. Do not create, edit, or \
+execute anything with built-in tools — those requests are denied. When tools \
+are exposed to you via the aivo-cursor-bridge MCP server, use them; they run \
+on the user's machine. Otherwise answer in plain text, presenting code or file \
+contents as fenced code blocks for the user to apply themselves.";
+
+/// Model-only applies when the route opted in AND the operator hasn't
+/// re-enabled native tools via env.
+pub(crate) fn model_only_active(config: &CursorRouterConfig) -> bool {
+    config.model_only && !cursor_acp::cursor_tools_env_explicitly_allowed()
+}
+
+/// Prefix `prompt` with [`MODEL_ONLY_PREAMBLE`] when model-only is active.
+pub(crate) fn model_only_prompt<'a>(
+    config: &CursorRouterConfig,
+    prompt: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    if model_only_active(config) {
+        std::borrow::Cow::Owned(format!("{MODEL_ONLY_PREAMBLE}\n\n{prompt}"))
+    } else {
+        std::borrow::Cow::Borrowed(prompt)
+    }
 }
 
 pub struct CursorModelRouter {
@@ -192,6 +226,7 @@ impl CursorModelRouter {
             spawn_mcp_prewarm_task(
                 self.config.key.clone(),
                 self.config.workspace_cwd.clone(),
+                model_only_active(&self.config),
                 mcp_bridge,
                 mcp_prewarmed,
                 id_style,
@@ -211,6 +246,7 @@ impl CursorModelRouter {
 pub(crate) fn spawn_mcp_prewarm_task(
     key: ApiKey,
     workspace_cwd: String,
+    model_only: bool,
     mcp_bridge: Arc<McpBridge>,
     slot: Arc<Mutex<McpPrewarmSlot>>,
     id_style: ToolUseIdStyle,
@@ -219,7 +255,8 @@ pub(crate) fn spawn_mcp_prewarm_task(
         let (bridge_session, mcp_url) = mcp_bridge.open_session_for_prewarm(id_style).await;
         let bridge_id = bridge_session.lock().await.id.clone();
         let result =
-            CursorAcpSession::open_with_mcp(&key, None, &workspace_cwd, Some(&mcp_url)).await;
+            CursorAcpSession::open_with_mcp(&key, None, &workspace_cwd, Some(&mcp_url), model_only)
+                .await;
         let notify = {
             let mut guard = slot.lock().await;
             match result {
@@ -298,6 +335,7 @@ pub(crate) async fn take_mcp_prewarmed(state: &RouterState) -> Option<McpPrewarm
                     spawn_mcp_prewarm_task(
                         state.config.key.clone(),
                         state.config.workspace_cwd.clone(),
+                        model_only_active(&state.config),
                         state.mcp_bridge.clone(),
                         state.mcp_prewarmed.clone(),
                         id_style,
@@ -404,6 +442,7 @@ pub(crate) async fn ensure_session_open(
         &state.config.key,
         requested_model,
         &state.config.workspace_cwd,
+        model_only_active(&state.config),
     )
     .await
     .context("open cursor-agent ACP session")?;
@@ -451,7 +490,14 @@ pub(crate) fn spawn_single_prewarm(state: Arc<RouterState>, slot_idx: usize) {
         if guard.is_some() {
             return;
         }
-        match CursorAcpSession::open(&state.config.key, None, &state.config.workspace_cwd).await {
+        match CursorAcpSession::open(
+            &state.config.key,
+            None,
+            &state.config.workspace_cwd,
+            model_only_active(&state.config),
+        )
+        .await
+        {
             Ok(session) => {
                 *guard = Some(session);
             }
@@ -683,6 +729,7 @@ where
         .unwrap_or_else(|| response_model_fallback.to_string());
 
     let input_tokens = estimate_tokens(&prompt);
+    let prompt = model_only_prompt(&state.config, &prompt);
     let blocks = cursor_acp::assemble_prompt_blocks(&prompt, image_blocks);
     let mut stream = match session.prompt_with_blocks(blocks).await {
         Ok(s) => s,

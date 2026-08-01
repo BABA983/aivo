@@ -1218,6 +1218,7 @@ async fn start_cursor_endpoint(key: &ApiKey) -> anyhow::Result<EndpointHandle> {
         prewarm_count: 0,
         mcp_prewarm_id_style: None,
         expected_token: Some(token.clone()),
+        model_only: false,
     });
     let (port, handle) = router.start_background().await?;
     Ok(EndpointHandle::new(port, token, handle, None))

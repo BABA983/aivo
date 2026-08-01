@@ -4466,6 +4466,7 @@ async fn open_cursor_session(
         &cwd,
         None,
         cursor_acp::ModelPickPreference::PreferNoThinking,
+        false,
         Some(auto_approve),
         Some(permission_prompt),
         hooks,

@@ -1494,6 +1494,8 @@ async fn start_cursor_router(env: &mut HashMap<String, String>, tool: AIToolType
         // Native-tool launches now inject a per-launch token too, so the
         // bearer gate applies the same as for the plugin endpoint.
         expected_token: loopback_auth_token(env),
+        // Local launch: native tools act on the caller's own machine.
+        model_only: false,
     });
     let (port, handle) = router.start_background().await?;
     tokio::spawn(async move {

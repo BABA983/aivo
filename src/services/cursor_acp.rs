@@ -28,6 +28,9 @@ pub const CURSOR_SHADOW_PREFIX: &str = "cursor-shadow:";
 /// is never accidentally pointed at the user's global cursor home.
 const LEGACY_CURSOR_LOGIN_SENTINEL: &str = "cursor-login";
 const CURSOR_AGENT_BIN: &str = "cursor-agent";
+/// Name aivo's HTTP MCP tool bridge registers under in `session/new`; also
+/// how [`is_mcp_bridge_tool_permission`] recognizes bridged tool calls.
+pub const MCP_BRIDGE_SERVER_NAME: &str = "aivo-cursor-bridge";
 
 /// Detects pre-shadow cursor keys that haven't been re-added since the
 /// switch to per-account isolation. The launcher refuses to use them so
@@ -66,6 +69,21 @@ fn cursor_allow_tools_env_override() -> Option<PermissionDecision> {
         None
     }
 }
+
+/// True when `AIVO_CURSOR_ALLOW_TOOLS` explicitly allows tool execution —
+/// the one escape hatch that disables model-only mode on a serve endpoint.
+pub fn cursor_tools_env_explicitly_allowed() -> bool {
+    matches!(
+        cursor_allow_tools_env_override(),
+        Some(PermissionDecision::Allow)
+    )
+}
+
+/// Serializes tests that touch `AIVO_CURSOR_ALLOW_TOOLS` — the lib test
+/// binary is multi-threaded, so env writes race readers in other tests.
+#[cfg(test)]
+pub(crate) static ALLOW_TOOLS_ENV_TEST_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
 
 /// Warn once when `AIVO_CURSOR_ALLOW_TOOLS` carries an unrecognized value.
 fn warn_unrecognized_allow_tools_once(value: &str) {
@@ -417,18 +435,43 @@ fn build_cursor_permission_request(params: &Value) -> CursorPermissionRequest {
     }
 }
 
+/// True when a `session/request_permission` is for a tool bridged through
+/// aivo's own MCP server (executes client-side, must stay allowed under
+/// model-only). Captured wire shape, cursor-agent 2026.05: bridged calls have
+/// `kind: "other"` + `title: "<server>-<tool>: <tool>"`; native tools carry
+/// `edit`/`execute` kinds and free-form titles.
+fn is_mcp_bridge_tool_permission(params: &Value) -> bool {
+    let tool_call = params.get("toolCall").unwrap_or(params);
+    tool_call.get("kind").and_then(Value::as_str) == Some("other")
+        && tool_call
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|t| {
+                t.strip_prefix(MCP_BRIDGE_SERVER_NAME)
+                    .is_some_and(|rest| rest.starts_with('-'))
+            })
+}
+
 /// Resolve one cursor `session/request_permission`. An `AIVO_CURSOR_ALLOW_TOOLS`
-/// override hard-wins; otherwise auto-approve-on allows silently; otherwise, when
-/// an interactive `prompt` is wired, ask the user (with "always" flipping
-/// `auto` on for the rest of the session); with no prompt, fall back to the
-/// toggle policy (off = conversation-only reject, no flag = allow-by-default).
+/// override hard-wins; then `model_only` allows only aivo's MCP-bridged tools
+/// and rejects the rest; otherwise auto-approve-on allows silently; otherwise
+/// an interactive `prompt` asks the user ("always" flips `auto` on); with no
+/// prompt, the toggle policy (off = reject, no flag = allow-by-default).
 async fn resolve_cursor_permission(
     params: &Value,
+    model_only: bool,
     auto: Option<&AtomicBool>,
     prompt: Option<&CursorPermissionPrompt>,
 ) -> PermissionDecision {
     if let Some(decision) = cursor_allow_tools_env_override() {
         return decision;
+    }
+    if model_only {
+        return if is_mcp_bridge_tool_permission(params) {
+            PermissionDecision::Allow
+        } else {
+            PermissionDecision::Reject
+        };
     }
     if auto.is_some_and(|f| f.load(Ordering::Relaxed)) {
         return PermissionDecision::Allow;
@@ -1304,13 +1347,13 @@ impl PromptCapabilities {
 
 impl CursorAcpSession {
     /// Spawn `cursor-agent acp`, run the initialize/authenticate/session/new
-    /// handshake, and optionally lock in a starting model. Uses the
-    /// env-var-controlled default permission policy (allow by default;
-    /// see [`CURSOR_ALLOW_TOOLS_ENV`]).
+    /// handshake, and optionally lock in a starting model. `model_only`
+    /// rejects native-tool permissions (see [`resolve_cursor_permission`]).
     pub async fn open(
         key: &ApiKey,
         requested_model: Option<&str>,
         workspace_cwd: &str,
+        model_only: bool,
     ) -> Result<Self> {
         Self::open_with_options(
             key,
@@ -1318,6 +1361,7 @@ impl CursorAcpSession {
             workspace_cwd,
             None,
             ModelPickPreference::Default,
+            model_only,
             None,
             None,
             CursorInteractionHooks::default(),
@@ -1334,6 +1378,7 @@ impl CursorAcpSession {
         requested_model: Option<&str>,
         workspace_cwd: &str,
         mcp_url: Option<&str>,
+        model_only: bool,
     ) -> Result<Self> {
         Self::open_with_options(
             key,
@@ -1341,6 +1386,7 @@ impl CursorAcpSession {
             workspace_cwd,
             mcp_url,
             ModelPickPreference::Default,
+            model_only,
             None,
             None,
             CursorInteractionHooks::default(),
@@ -1349,9 +1395,7 @@ impl CursorAcpSession {
     }
 
     /// Most general open: lets callers register an MCP server and pick a model
-    /// preference. Tool execution follows the env-var default permission policy
-    /// (allow by default; set `AIVO_CURSOR_ALLOW_TOOLS=0` for conversation-only —
-    /// see [`CURSOR_ALLOW_TOOLS_ENV`]).
+    /// preference. Tool permissions follow [`resolve_cursor_permission`].
     #[allow(clippy::too_many_arguments)]
     pub async fn open_with_options(
         key: &ApiKey,
@@ -1359,6 +1403,7 @@ impl CursorAcpSession {
         workspace_cwd: &str,
         mcp_url: Option<&str>,
         model_pick_preference: ModelPickPreference,
+        model_only: bool,
         auto_approve: Option<Arc<AtomicBool>>,
         permission_prompt: Option<CursorPermissionPrompt>,
         hooks: CursorInteractionHooks,
@@ -1382,7 +1427,8 @@ impl CursorAcpSession {
             let auto = auto_approve.clone();
             let prompt = permission_prompt.clone();
             Box::pin(async move {
-                resolve_cursor_permission(&params, auto.as_deref(), prompt.as_ref()).await
+                resolve_cursor_permission(&params, model_only, auto.as_deref(), prompt.as_ref())
+                    .await
             })
         });
         let ext_method_fn = build_ext_method_fn(hooks);
@@ -1412,7 +1458,7 @@ impl CursorAcpSession {
             .map(|url| {
                 vec![json!({
                     "type": "http",
-                    "name": "aivo-cursor-bridge",
+                    "name": MCP_BRIDGE_SERVER_NAME,
                     "url": url,
                     "headers": [],
                 })]
@@ -1582,6 +1628,7 @@ where
         workspace_cwd,
         None,
         ModelPickPreference::PreferNoThinking,
+        false,
         Some(one_shot_tools_off),
         None,
         CursorInteractionHooks::default(),
@@ -1949,6 +1996,40 @@ mod tests {
     fn mode_available_allows_switch_when_no_modes_advertised() {
         assert!(mode_available(&Value::Null, "plan"));
         assert!(mode_available(&json!({}), "agent"));
+    }
+
+    /// Model-only outranks auto-approve; only aivo's MCP-bridged tools
+    /// (client-side execution) pass. Shapes captured from cursor-agent 2026.05.
+    #[tokio::test]
+    async fn model_only_rejects_native_tools_but_allows_mcp_bridge() {
+        let _env = ALLOW_TOOLS_ENV_TEST_LOCK.lock().await;
+        // SAFETY: serialized by the lock above.
+        unsafe { std::env::remove_var(CURSOR_ALLOW_TOOLS_ENV) };
+        let auto = AtomicBool::new(true);
+
+        let native = json!({"toolCall": {"kind": "execute", "title": "Run `rm -rf /`"}});
+        let d = resolve_cursor_permission(&native, true, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Reject));
+        let d = resolve_cursor_permission(&json!({}), true, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Reject));
+
+        let bridged = json!({"toolCall": {
+            "kind": "other",
+            "title": "aivo-cursor-bridge-write_file: write_file",
+            "toolCallId": "toolu_bdrk_015cg5nZWt1cZ1wxpnyNsiQF"
+        }});
+        let d = resolve_cursor_permission(&bridged, true, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Allow));
+
+        let spoof_kind = json!({"toolCall": {"kind": "edit", "title": "aivo-cursor-bridge-x: x"}});
+        let d = resolve_cursor_permission(&spoof_kind, true, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Reject));
+        let near_miss = json!({"toolCall": {"kind": "other", "title": "aivo-cursor-bridgex: x"}});
+        let d = resolve_cursor_permission(&near_miss, true, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Reject));
+
+        let d = resolve_cursor_permission(&native, false, Some(&auto), None).await;
+        assert!(matches!(d, PermissionDecision::Allow));
     }
 
     #[test]
@@ -2370,14 +2451,11 @@ mod tests {
 
     #[test]
     fn permission_decision_env_overrides_then_follows_toggle() {
-        // Serialize against other env-var tests in the binary by saving the
-        // prior value (if any) and restoring it on exit.
+        let _env = ALLOW_TOOLS_ENV_TEST_LOCK.blocking_lock();
         let prior = std::env::var(CURSOR_ALLOW_TOOLS_ENV).ok();
         let on = AtomicBool::new(true);
         let off = AtomicBool::new(false);
-        // SAFETY: tests run single-threaded by default for this binary; the
-        // restore in the guard below keeps state consistent for any parallel
-        // peers that may read this env var afterwards.
+        // SAFETY: serialized by the lock above; restored below.
         unsafe { std::env::remove_var(CURSOR_ALLOW_TOOLS_ENV) };
         // Env unset: no toggle => legacy allow-by-default; toggle governs when set.
         assert_eq!(cursor_permission_decision(None), PermissionDecision::Allow);
@@ -2433,8 +2511,9 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_cursor_permission_prompts_when_off_and_honors_decision() {
+        let _env = ALLOW_TOOLS_ENV_TEST_LOCK.lock().await;
         let prior = std::env::var(CURSOR_ALLOW_TOOLS_ENV).ok();
-        // SAFETY: this binary's tests run single-threaded; restored below.
+        // SAFETY: serialized by the lock above; restored below.
         unsafe { std::env::remove_var(CURSOR_ALLOW_TOOLS_ENV) };
 
         let allow: CursorPermissionPrompt = Arc::new(|_| Box::pin(async { Decision::Allow }));
@@ -2442,12 +2521,12 @@ mod tests {
         let off = AtomicBool::new(false);
 
         assert_eq!(
-            resolve_cursor_permission(&json!({}), Some(&off), Some(&allow)).await,
+            resolve_cursor_permission(&json!({}), false, Some(&off), Some(&allow)).await,
             PermissionDecision::Allow,
             "approved card → allow"
         );
         assert_eq!(
-            resolve_cursor_permission(&json!({}), Some(&off), Some(&deny)).await,
+            resolve_cursor_permission(&json!({}), false, Some(&off), Some(&deny)).await,
             PermissionDecision::Reject,
             "denied card → reject"
         );
@@ -2457,7 +2536,7 @@ mod tests {
             Arc::new(|_| Box::pin(async { Decision::AlwaysAllow }));
         let flag = AtomicBool::new(false);
         assert_eq!(
-            resolve_cursor_permission(&json!({}), Some(&flag), Some(&always)).await,
+            resolve_cursor_permission(&json!({}), false, Some(&flag), Some(&always)).await,
             PermissionDecision::Allow
         );
         assert!(
@@ -2474,14 +2553,14 @@ mod tests {
         });
         let on = AtomicBool::new(true);
         assert_eq!(
-            resolve_cursor_permission(&json!({}), Some(&on), Some(&never)).await,
+            resolve_cursor_permission(&json!({}), false, Some(&on), Some(&never)).await,
             PermissionDecision::Allow
         );
         assert!(!called.load(Ordering::Relaxed), "auto-on skips the prompt");
 
         // No interactive prompt → falls back to the toggle policy (off = reject).
         assert_eq!(
-            resolve_cursor_permission(&json!({}), Some(&off), None).await,
+            resolve_cursor_permission(&json!({}), false, Some(&off), None).await,
             PermissionDecision::Reject
         );
 

@@ -382,6 +382,8 @@ async fn serve_cursor(params: CursorServeParams) -> Result<ExitCode> {
         prewarm_count: 0,
         mcp_prewarm_id_style: None,
         expected_token: auth_token.clone(),
+        // Remote callers: cursor's native tools would act on THIS machine.
+        model_only: true,
     });
 
     let listener = crate::services::serve_router::bind_serve_listener(&host, port).await?;
@@ -411,6 +413,17 @@ async fn serve_cursor(params: CursorServeParams) -> Result<ExitCode> {
         "  {} first request starts cursor-agent (may take a few seconds)",
         style::dim("·")
     );
+    if cursor_acp::cursor_tools_env_explicitly_allowed() {
+        eprintln!(
+            "  {} AIVO_CURSOR_ALLOW_TOOLS: cursor's native tools run on THIS machine",
+            style::yellow("!"),
+        );
+    } else {
+        eprintln!(
+            "  {} model-only: cursor's native tools are disabled; client-declared tools run client-side",
+            style::dim("·")
+        );
+    }
     eprintln!("  {}", style::dim("Press Ctrl+C to stop"));
 
     #[allow(clippy::let_unit_value)]
