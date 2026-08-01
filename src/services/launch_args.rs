@@ -32,6 +32,7 @@ pub(crate) fn preview_args(
     raw_args: &[String],
     model: Option<&str>,
     env: &HashMap<String, String>,
+    codex_effort: Option<&str>,
 ) -> Vec<String> {
     let args = inject_claude_teammate_mode(tool, raw_args);
     if tool == AIToolType::Pi {
@@ -45,9 +46,11 @@ pub(crate) fn preview_args(
         return args;
     }
 
-    let use_responses_router = uses_responses_to_chat_router(env);
-    let args = inject_codex_model(model, &args, use_responses_router);
-    let args = if should_preview_codex_model_catalog(model, use_responses_router) {
+    let raw_model_upstream =
+        uses_responses_to_chat_router(env) || env.contains_key("OPENAI_BASE_URL");
+    let args = inject_codex_model(model, &args, raw_model_upstream);
+    let args = inject_codex_reasoning_effort(codex_effort, &args);
+    let args = if should_preview_codex_model_catalog(model, raw_model_upstream) {
         let mut preview = vec![
             "--config".to_string(),
             "model_catalog_json=\"<temp:aivo-codex-model-catalog.json>\"".to_string(),
@@ -65,6 +68,7 @@ pub(crate) fn build_preview_notes(
     raw_args: &[String],
     model: Option<&str>,
     env: &HashMap<String, String>,
+    codex_effort: Option<&str>,
 ) -> Vec<String> {
     let mut notes = Vec::new();
 
@@ -143,7 +147,8 @@ pub(crate) fn build_preview_notes(
         "starts a Copilot-backed Pi router on a random local port",
     );
 
-    let use_responses_router = uses_responses_to_chat_router(env);
+    let raw_model_upstream =
+        uses_responses_to_chat_router(env) || env.contains_key("OPENAI_BASE_URL");
     if tool.is_codex_family()
         && model.is_some()
         && !raw_args.iter().any(|arg| {
@@ -152,7 +157,15 @@ pub(crate) fn build_preview_notes(
     {
         notes.push("injects `-m <model>` for Codex".to_string());
     }
-    if tool.is_codex_family() && should_preview_codex_model_catalog(model, use_responses_router) {
+    if tool.is_codex_family()
+        && codex_effort.is_some_and(|e| !e.is_empty())
+        && !raw_args
+            .iter()
+            .any(|a| a.contains("model_reasoning_effort"))
+    {
+        notes.push("injects `--config model_reasoning_effort` for Codex".to_string());
+    }
+    if tool.is_codex_family() && should_preview_codex_model_catalog(model, raw_model_upstream) {
         notes.push("writes a temporary Codex model catalog file at launch time".to_string());
     }
     if tool.is_codex_family() && env.contains_key("OPENAI_BASE_URL") {
@@ -181,6 +194,7 @@ pub(crate) async fn build_runtime_args(
     aivo_env: &HashMap<String, String>,
     cache: &ModelsCache,
     upstream_base_url: Option<&str>,
+    codex_effort: Option<&str>,
 ) -> Result<RuntimeArgs> {
     let args = inject_claude_teammate_mode(tool, raw_args);
     if tool == AIToolType::Pi {
@@ -204,15 +218,19 @@ pub(crate) async fn build_runtime_args(
     }
 
     let use_responses_router = uses_responses_to_chat_router(env);
+    // Direct OPENAI_BASE_URL connections resolve raw slugs too; only the
+    // ChatGPT-OAuth path (no base URL, no router) keeps codex's built-in catalog.
+    let raw_model_upstream = use_responses_router || env.contains_key("OPENAI_BASE_URL");
     let codex_model_catalog_path = maybe_write_codex_model_catalog(
         model,
         codex_app_models,
-        use_responses_router,
+        raw_model_upstream,
         cache,
         upstream_base_url,
     )
     .await?;
-    let args = inject_codex_model(model, &args, use_responses_router);
+    let args = inject_codex_model(model, &args, raw_model_upstream);
+    let args = inject_codex_reasoning_effort(codex_effort, &args);
     let args = inject_codex_model_catalog(codex_model_catalog_path.as_deref(), &args);
     let args = inject_codex_cursor_tui_reasoning(use_responses_router, &args);
 
@@ -483,22 +501,17 @@ fn maybe_push_router_note(
     }
 }
 
-fn should_preview_codex_model_catalog(model: Option<&str>, uses_non_openai_router: bool) -> bool {
+fn should_preview_codex_model_catalog(model: Option<&str>, raw_model_upstream: bool) -> bool {
     let model = match model {
         Some(model) if !model.is_empty() => model,
         _ => return false,
     };
 
-    if !uses_non_openai_router {
+    if !raw_model_upstream {
         return false;
     }
 
-    let model_lower = model.to_lowercase();
-    let name_only = model_lower.split('/').next_back().unwrap_or(&model_lower);
-    !(name_only.starts_with("gpt-")
-        || name_only.starts_with("o1")
-        || name_only.starts_with("o3")
-        || name_only.starts_with("o4"))
+    !is_openai_shaped_slug(model)
 }
 
 /// Path shown by `--dry-run` in place of the real pin file: previews must
@@ -629,7 +642,13 @@ fn inject_pi_model(model: Option<&str>, args: &[String]) -> Vec<String> {
     new_args
 }
 
-fn inject_codex_model(model: Option<&str>, args: &[String], use_router: bool) -> Vec<String> {
+/// `raw_model_upstream`: the upstream resolves raw model ids, so the slug
+/// passes through; only the ChatGPT-OAuth path remaps unknown slugs.
+fn inject_codex_model(
+    model: Option<&str>,
+    args: &[String],
+    raw_model_upstream: bool,
+) -> Vec<String> {
     let model = match model {
         Some(m) if !m.is_empty() => m,
         _ => return args.to_vec(),
@@ -642,12 +661,31 @@ fn inject_codex_model(model: Option<&str>, args: &[String], use_router: bool) ->
         return args.to_vec();
     }
 
-    let codex_model = if use_router {
+    let codex_model = if raw_model_upstream {
         model.to_string()
     } else {
         map_model_for_codex_cli(model)
     };
     let mut new_args = vec!["-m".to_string(), codex_model];
+    new_args.extend_from_slice(args);
+    new_args
+}
+
+/// Prepended so a user-supplied `-c model_reasoning_effort=...` parses later
+/// and wins; for codex-app the pair rides the global prefix into the wrapper.
+fn inject_codex_reasoning_effort(effort: Option<&str>, args: &[String]) -> Vec<String> {
+    let effort = match effort {
+        Some(e) if !e.is_empty() => e,
+        _ => return args.to_vec(),
+    };
+    if args.iter().any(|a| a.contains("model_reasoning_effort")) {
+        return args.to_vec();
+    }
+    let escaped = effort.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut new_args = vec![
+        "--config".to_string(),
+        format!("model_reasoning_effort=\"{}\"", escaped),
+    ];
     new_args.extend_from_slice(args);
     new_args
 }
@@ -730,11 +768,11 @@ fn inject_codex_model_catalog(path: Option<&str>, args: &[String]) -> Vec<String
 async fn maybe_write_codex_model_catalog(
     model: Option<&str>,
     codex_app_models: Option<&[String]>,
-    uses_non_openai_router: bool,
+    raw_model_upstream: bool,
     cache: &ModelsCache,
     upstream_base_url: Option<&str>,
 ) -> Result<Option<String>> {
-    let slugs = catalog_slugs(model, codex_app_models, uses_non_openai_router);
+    let slugs = catalog_slugs(model, codex_app_models, raw_model_upstream);
     if slugs.is_empty() {
         return Ok(None);
     }
@@ -777,7 +815,7 @@ async fn maybe_write_codex_model_catalog(
 fn catalog_slugs(
     model: Option<&str>,
     codex_app_models: Option<&[String]>,
-    uses_non_openai_router: bool,
+    raw_model_upstream: bool,
 ) -> Vec<String> {
     // CodexApp: discovered provider models plus the explicit `-m`, for the GUI
     // dropdown. Reject control-byte slugs — they'd break out of the TOML
@@ -807,13 +845,13 @@ fn catalog_slugs(
     }
 
     // CLI single-model path: only write when the model is non-OpenAI-shaped
-    // and we're behind a non-OpenAI router (else codex's built-in catalog
+    // and the upstream resolves raw slugs (else codex's built-in catalog
     // serves the user without aivo interference).
     let model = match model {
         Some(m) if !m.is_empty() && is_safe_codex_slug(m) => m,
         _ => return Vec::new(),
     };
-    if !uses_non_openai_router {
+    if !raw_model_upstream {
         return Vec::new();
     }
     if is_openai_shaped_slug(model) {
@@ -876,16 +914,14 @@ fn model_entry(model: &str, index: usize, limits: Option<&ResolvedLimits>) -> se
     } else {
         json!(["text"])
     };
-    // Published effort levels when models.dev knows them, filtered to the
-    // values codex accepts; the low/medium/high hardcode stays the fallback
-    // so unknown models behave exactly as before.
+    // Published efforts pass through verbatim — codex's ReasoningEffort has
+    // Custom(String); low/medium/high stays the unknown-model fallback.
     let published_efforts: Vec<&str> = limits
-        .and_then(|l| l.caps)
-        .map(|caps| {
-            caps.reasoning_efforts
+        .map(|l| {
+            l.reasoning_efforts
                 .iter()
                 .map(String::as_str)
-                .filter(|e| ["minimal", "low", "medium", "high"].contains(e))
+                .filter(|e| is_safe_codex_slug(e))
                 .collect()
         })
         .unwrap_or_default();
@@ -894,16 +930,19 @@ fn model_entry(model: &str, index: usize, limits: Option<&ResolvedLimits>) -> se
     } else {
         published_efforts
     };
+    // medium → high → first; the last entry would pin the priciest level.
     let default_effort = if efforts.contains(&"medium") {
         "medium"
+    } else if efforts.contains(&"high") {
+        "high"
     } else {
-        efforts[efforts.len() - 1]
+        efforts[0]
     };
     let supported_reasoning_levels: Vec<serde_json::Value> = efforts
         .iter()
         .map(|e| json!({"effort": e, "description": format!("{e} reasoning")}))
         .collect();
-    let mut entry = json!({
+    json!({
         "slug": model,
         "display_name": model,
         "description": format!("aivo-routed model {}", model),
@@ -919,7 +958,10 @@ fn model_entry(model: &str, index: usize, limits: Option<&ResolvedLimits>) -> se
         "upgrade": serde_json::Value::Null,
         "base_instructions": "You are a coding agent.",
         "model_messages": serde_json::Value::Null,
+        // 0.146 renamed this to `supports_reasoning_summary_parameter` with a
+        // serde default of TRUE; emit both spellings (unknown fields are ignored).
         "supports_reasoning_summaries": false,
+        "supports_reasoning_summary_parameter": false,
         "default_reasoning_summary": "none",
         "support_verbosity": false,
         "default_verbosity": serde_json::Value::Null,
@@ -934,17 +976,39 @@ fn model_entry(model: &str, index: usize, limits: Option<&ResolvedLimits>) -> se
         "experimental_supported_tools": [],
         "input_modalities": input_modalities,
         "supports_search_tool": false
-    });
-    // Omitted (not null) when unknown so codex's own default applies.
-    if let Some(output) = limits.and_then(|l| l.output) {
-        entry["max_output_tokens"] = json!(output);
-    }
-    entry
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inject_codex_reasoning_effort_prepends_config_pair() {
+        let args = vec!["prompt".to_string()];
+        let result = inject_codex_reasoning_effort(Some("xhigh"), &args);
+        assert_eq!(
+            result,
+            vec!["--config", "model_reasoning_effort=\"xhigh\"", "prompt"]
+        );
+    }
+
+    #[test]
+    fn inject_codex_reasoning_effort_defers_to_user_config() {
+        let args = vec![
+            "-c".to_string(),
+            "model_reasoning_effort=low".to_string(),
+            "prompt".to_string(),
+        ];
+        assert_eq!(inject_codex_reasoning_effort(Some("high"), &args), args);
+    }
+
+    #[test]
+    fn inject_codex_reasoning_effort_noop_when_absent() {
+        let args = vec!["prompt".to_string()];
+        assert_eq!(inject_codex_reasoning_effort(None, &args), args);
+        assert_eq!(inject_codex_reasoning_effort(Some(""), &args), args);
+    }
 
     #[test]
     fn uses_responses_to_chat_router_recognizes_cursor_router() {
@@ -978,6 +1042,7 @@ mod tests {
             &env,
             &cache,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1005,6 +1070,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_connection_codex_keeps_model_and_writes_catalog() {
+        // Regression: direct OPENAI_BASE_URL (no router) must keep the raw
+        // slug — map_model_for_codex_cli would send a literal `gpt-4o` upstream.
+        let env = HashMap::from([
+            (
+                "OPENAI_BASE_URL".to_string(),
+                "https://api.deepseek.com".to_string(),
+            ),
+            ("OPENAI_API_KEY".to_string(), "sk-test".to_string()),
+        ]);
+        let (_dir, cache) = empty_cache();
+        let runtime = build_runtime_args(
+            AIToolType::Codex,
+            &["prompt".to_string()],
+            Some("deepseek-v4-pro"),
+            None,
+            &env,
+            &env,
+            &cache,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let m_idx = runtime
+            .args
+            .iter()
+            .position(|a| a == "-m")
+            .expect("-m flag present");
+        assert_eq!(runtime.args[m_idx + 1], "deepseek-v4-pro");
+        assert!(
+            runtime.codex_model_catalog_path.is_some(),
+            "direct non-OpenAI model must get a catalog so codex accepts the slug"
+        );
+        if let Some(path) = runtime.codex_model_catalog_path {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_path_codex_still_remaps_unknown_models() {
+        // No base URL and no router = native ChatGPT auth; slugs still remap.
+        let env: HashMap<String, String> = HashMap::new();
+        let (_dir, cache) = empty_cache();
+        let runtime = build_runtime_args(
+            AIToolType::Codex,
+            &[],
+            Some("deepseek-v4-pro"),
+            None,
+            &env,
+            &env,
+            &cache,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let m_idx = runtime.args.iter().position(|a| a == "-m").unwrap();
+        assert_eq!(runtime.args[m_idx + 1], "gpt-4o");
+        assert!(runtime.codex_model_catalog_path.is_none());
+    }
+
+    #[tokio::test]
     async fn codex_app_wraps_global_options_before_app_subcommand() {
         let env = HashMap::from([
             (
@@ -1022,6 +1152,7 @@ mod tests {
             &env,
             &env,
             &cache,
+            None,
             None,
         )
         .await
@@ -1250,6 +1381,7 @@ mod tests {
             &env,
             &cache,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1406,7 +1538,9 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["models"][0]["context_window"], 1_000_000);
         assert_eq!(parsed["models"][0]["max_context_window"], 1_000_000);
-        assert_eq!(parsed["models"][0]["max_output_tokens"], 64_000);
+        // `max_output_tokens` is not a codex ModelInfo field (0.144/0.146
+        // source) — must not be emitted.
+        assert!(parsed["models"][0].get("max_output_tokens").is_none());
         // claude takes image input; deepseek-chat doesn't.
         assert_eq!(
             parsed["models"][0]["input_modalities"],
@@ -1425,6 +1559,7 @@ mod tests {
             // Absent from the catalog → no published efforts, exercises the
             // fallback robustly (a real slug re-breaks when models.dev adds efforts).
             "nonexistent-fallback-model".to_string(),
+            "deepseek-v4-flash".to_string(),
         ];
         let mut limits = HashMap::new();
         for slug in &slugs {
@@ -1446,16 +1581,30 @@ mod tests {
         // Publishes minimal,low,medium,high.
         assert_eq!(levels(0), ["minimal", "low", "medium", "high"]);
         assert_eq!(parsed["models"][0]["default_reasoning_level"], "medium");
-        // Publishes none,minimal,low,medium,high,xhigh,max — filtered to
-        // codex-safe values.
-        assert_eq!(levels(1), ["minimal", "low", "medium", "high"]);
+        // Publishes none,minimal,low,medium,high,xhigh,max — passed through
+        // verbatim: codex's ReasoningEffort has Custom(String), so every
+        // published value is selectable.
+        assert_eq!(
+            levels(1),
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(parsed["models"][1]["default_reasoning_level"], "medium");
-        // Publishes low,high — no medium, so the default falls to the last.
+        // Publishes low,high — no medium, so the default falls to high.
         assert_eq!(levels(2), ["low", "high"]);
         assert_eq!(parsed["models"][2]["default_reasoning_level"], "high");
         // Publishes nothing → hardcoded low,medium,high fallback.
         assert_eq!(levels(3), ["low", "medium", "high"]);
         assert_eq!(parsed["models"][3]["default_reasoning_level"], "medium");
+        // Publishes high,max — default must be high, not the priciest level.
+        assert_eq!(levels(4), ["high", "max"]);
+        assert_eq!(parsed["models"][4]["default_reasoning_level"], "high");
+        // 0.146 renamed the summary flag with a default of true; both
+        // spellings must be pinned false.
+        assert_eq!(parsed["models"][0]["supports_reasoning_summaries"], false);
+        assert_eq!(
+            parsed["models"][0]["supports_reasoning_summary_parameter"],
+            false
+        );
     }
 
     #[test]
@@ -1624,6 +1773,7 @@ mod tests {
             &env,
             &env,
             &cache,
+            None,
             None,
         )
         .await

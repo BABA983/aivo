@@ -64,8 +64,17 @@ pub(crate) fn apply_max_tokens_cap_to_fields(body: &mut Value, cap: Option<u64>,
     }
 }
 
-/// Cap `reasoning.effort` values that most models don't support (e.g. `xhigh` → `high`).
+/// Cap `reasoning.effort` values most models don't support (`xhigh` → `high`),
+/// unless the model's snapshot publishes the level; unknown models stay clamped.
 pub(crate) fn cap_reasoning_effort(body: &mut Value) {
+    let xhigh_published = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .and_then(crate::services::model_metadata::snapshot_limits)
+        .is_some_and(|l| l.reasoning_efforts.iter().any(|e| e == "xhigh"));
+    if xhigh_published {
+        return;
+    }
     if let Some(effort) = body
         .get("reasoning")
         .and_then(|r| r.get("effort"))
@@ -3388,6 +3397,26 @@ mod tests {
     #[test]
     fn cap_reasoning_effort_passes_through_high() {
         let mut body = json!({"reasoning_effort": "high"});
+        cap_reasoning_effort(&mut body);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn cap_reasoning_effort_spares_models_publishing_xhigh() {
+        // kimi-k2.6 publishes xhigh in the embedded snapshot.
+        let mut body = json!({"model": "kimi-k2.6", "reasoning_effort": "xhigh"});
+        cap_reasoning_effort(&mut body);
+        assert_eq!(body["reasoning_effort"], "xhigh");
+
+        let mut body = json!({"model": "kimi-k2.6", "reasoning": {"effort": "xhigh"}});
+        cap_reasoning_effort(&mut body);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+    }
+
+    #[test]
+    fn cap_reasoning_effort_still_clamps_models_without_xhigh() {
+        // deepseek-v4-flash publishes only high,max.
+        let mut body = json!({"model": "deepseek-v4-flash", "reasoning_effort": "xhigh"});
         cap_reasoning_effort(&mut body);
         assert_eq!(body["reasoning_effort"], "high");
     }

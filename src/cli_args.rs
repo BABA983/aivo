@@ -281,6 +281,8 @@ pub(crate) struct ExtractedFlags {
     pub(crate) remaining_args: Vec<String>,
     /// `None` = flag absent, `Some("id")` = session id, `Some("")` = bare flag (picker).
     pub(crate) resume: Option<String>,
+    /// Codex only: `Some("")` = bare `--effort` (picker).
+    pub(crate) effort: Option<String>,
     /// `None` = flag absent. `Some("1m")` = activate the 1M-context spoof.
     pub(crate) max_context: Option<String>,
     pub(crate) transform: bool,
@@ -333,6 +335,7 @@ pub(crate) fn extract_aivo_flags(
     initial_relogin: bool,
     initial_envs: Vec<String>,
     initial_max_context: Option<String>,
+    initial_effort: Option<String>,
     passthrough_args: &[String],
 ) -> ExtractedFlags {
     // Clap may have consumed a following flag as the value of -m/-k (e.g. `-m --resume`
@@ -358,6 +361,7 @@ pub(crate) fn extract_aivo_flags(
     let mut relogin = initial_relogin;
     let mut resume: Option<String> = None;
     let mut max_context: Option<String> = initial_max_context;
+    let mut effort: Option<String> = initial_effort;
     let mut transform = false;
     let mut transparent = false;
     let mut env_strings = initial_envs;
@@ -396,6 +400,13 @@ pub(crate) fn extract_aivo_flags(
     sanitize_slot(&mut haiku_model);
     sanitize_slot(&mut sonnet_model);
     sanitize_slot(&mut opus_model);
+    // A level never starts with `-`; degrade a clap-eaten flag to the picker.
+    if let Some(ref v) = effort
+        && v.starts_with('-')
+    {
+        remaining_args.push(v.clone());
+        effort = Some(String::new());
+    }
 
     let mut model: Option<String> = model.map(|(_, v)| v);
     let mut key_flag: Option<String> = key_flag.map(|(_, v)| v);
@@ -538,6 +549,19 @@ pub(crate) fn extract_aivo_flags(
             } else {
                 opus_model = Some(String::new());
             }
+        } else if let Some(value) = arg.strip_prefix("--effort=") {
+            if !value.is_empty() && effort.is_none() {
+                effort = Some(value.to_string());
+            } else {
+                remaining_args.push(arg.clone());
+            }
+        } else if arg == "--effort" && effort.is_none() {
+            if i + 1 < passthrough_args.len() && !passthrough_args[i + 1].starts_with('-') {
+                effort = Some(passthrough_args[i + 1].clone());
+                i += 1;
+            } else {
+                effort = Some(String::new());
+            }
         } else if let Some(value) = arg.strip_prefix("--max-context=") {
             if !value.is_empty() && max_context.is_none() {
                 max_context = Some(value.to_string());
@@ -585,6 +609,7 @@ pub(crate) fn extract_aivo_flags(
         env_strings,
         remaining_args,
         resume,
+        effort,
         max_context,
         transform,
         transparent,
@@ -687,10 +712,82 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--model=gpt-4o", "file.ts"]),
         );
         assert_eq!(r.model, Some("gpt-4o".to_string()));
         assert_eq!(r.remaining_args, args(&["file.ts"]));
+    }
+
+    #[test]
+    fn effort_flag_forms() {
+        let r = extract_aivo_flags(
+            None,
+            ClaudeSlotFlags::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            vec![],
+            None,
+            None,
+            &args(&["--effort", "xhigh", "prompt"]),
+        );
+        assert_eq!(r.effort.as_deref(), Some("xhigh"));
+        assert_eq!(r.remaining_args, args(&["prompt"]));
+
+        let r = extract_aivo_flags(
+            None,
+            ClaudeSlotFlags::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            vec![],
+            None,
+            None,
+            &args(&["--effort=max"]),
+        );
+        assert_eq!(r.effort.as_deref(), Some("max"));
+
+        // Bare flag → picker sentinel; the following flag stays passthrough.
+        let r = extract_aivo_flags(
+            None,
+            ClaudeSlotFlags::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            vec![],
+            None,
+            None,
+            &args(&["--effort", "--json"]),
+        );
+        assert_eq!(r.effort.as_deref(), Some(""));
+        assert_eq!(r.remaining_args, args(&["--json"]));
+    }
+
+    #[test]
+    fn effort_flag_lookalike_value_degrades_to_picker() {
+        // Same policy as -m/-k lookalikes: pushed back, bare sentinel remains.
+        let r = extract_aivo_flags(
+            None,
+            ClaudeSlotFlags::default(),
+            None,
+            None,
+            false,
+            false,
+            false,
+            vec![],
+            None,
+            Some("--json".to_string()),
+            &args(&[]),
+        );
+        assert_eq!(r.effort.as_deref(), Some(""));
+        assert_eq!(r.remaining_args, args(&["--json"]));
     }
 
     #[test]
@@ -704,6 +801,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--transform", "--transparent"]),
         );
@@ -726,6 +824,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF"]),
         );
         assert_eq!(
@@ -746,6 +845,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"]),
         );
@@ -770,6 +870,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF"]),
         );
         assert_eq!(r.model.as_deref(), Some("gpt-4o"));
@@ -790,6 +891,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["hf:Qwen/Qwen2.5-0.5B-Instruct-GGUF", "tell me about rust"]),
         );
@@ -813,6 +915,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["file.ts", "do the thing"]),
         );
         assert_eq!(r.model, None);
@@ -830,6 +933,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--model", "gpt-4o", "file.ts"]),
         );
@@ -849,6 +953,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["-m", "gpt-4o"]),
         );
         assert_eq!(r.model, Some("gpt-4o".to_string()));
@@ -867,6 +972,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--model"]),
         );
         assert_eq!(r.model, Some(String::new()));
@@ -884,6 +990,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &[],
         );
@@ -904,6 +1011,7 @@ mod tests {
                 false,
                 vec![],
                 None,
+                None,
                 &args(argv),
             );
             assert_eq!(r.resume, Some("abc123".to_string()));
@@ -919,6 +1027,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--resume", "abc", "-c"]),
         );
@@ -939,6 +1048,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--resume", "--dry-run"]),
         );
         assert_eq!(r.resume, Some(String::new()));
@@ -951,6 +1061,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--resume=", "--resume=zzz"]),
         );
@@ -971,6 +1082,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--model", "other"]),
         );
         assert_eq!(r.model, Some("gpt-4o".to_string()));
@@ -989,6 +1101,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--key=mykey"]),
         );
         assert_eq!(r.key_flag, Some("mykey".to_string()));
@@ -1005,6 +1118,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--key", "mykey"]),
         );
@@ -1023,6 +1137,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["-k", "mykey"]),
         );
         assert_eq!(r.key_flag, Some("mykey".to_string()));
@@ -1039,6 +1154,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &[],
         );
@@ -1058,6 +1174,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["-k"]),
         );
         assert_eq!(r.key_flag, Some(String::new()));
@@ -1074,6 +1191,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--debug", "file.ts"]),
         );
@@ -1093,6 +1211,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &[],
         );
         assert_eq!(r.debug, Some(String::new()));
@@ -1109,6 +1228,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--dry-run"]),
         );
@@ -1127,6 +1247,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--env=FOO=bar"]),
         );
         assert_eq!(r.env_strings, vec!["FOO=bar"]);
@@ -1143,6 +1264,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["-e=FOO=bar"]),
         );
@@ -1161,6 +1283,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--env", "FOO=bar"]),
         );
         assert_eq!(r.env_strings, vec!["FOO=bar"]);
@@ -1177,6 +1300,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["-e", "FOO=bar"]),
         );
@@ -1198,6 +1322,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--relogin"]),
         );
         assert!(r.relogin);
@@ -1216,6 +1341,7 @@ mod tests {
             true, // initial_relogin from clap
             vec![],
             None,
+            None,
             &args(&[]),
         );
         assert!(r.relogin);
@@ -1232,6 +1358,7 @@ mod tests {
             false,
             false,
             vec!["PRE=1".to_string()],
+            None,
             None,
             &args(&["-e", "POST=2"]),
         );
@@ -1250,6 +1377,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--max-context=1m", "file.ts"]),
         );
         assert_eq!(r.max_context, Some("1m".to_string()));
@@ -1267,6 +1395,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--max-context", "1m"]),
         );
@@ -1287,6 +1416,7 @@ mod tests {
             false,
             vec![],
             Some("1m".to_string()),
+            None,
             &args(&["file.ts"]),
         );
         assert_eq!(r.max_context, Some("1m".to_string()));
@@ -1339,6 +1469,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--1m", "file.ts"]),
         );
         assert_eq!(r.max_context, Some("1m".to_string()));
@@ -1356,6 +1487,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--2m", "file.ts"]),
         );
@@ -1375,6 +1507,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--12m", "file.ts"]),
         );
         assert_eq!(r.max_context, Some("12m".to_string()));
@@ -1392,6 +1525,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--3M"]),
         );
@@ -1411,6 +1545,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["--foo", "--ma", "--m", "--1mb"]),
         );
@@ -1449,6 +1584,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--agent-name", "foo", "--resume"]),
         );
         assert_eq!(r.remaining_args, args(&["--agent-name", "foo"]));
@@ -1467,6 +1603,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&[
                 "--agent-name",
@@ -1921,6 +2058,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["fix the login bug"]),
         );
         assert_eq!(r.remaining_args, args(&["fix the login bug"]));
@@ -1939,6 +2077,7 @@ mod tests {
             false,
             vec![],
             None,
+            None,
             &args(&["--model", "gpt-4o", "fix the login bug"]),
         );
         assert_eq!(r.model, Some("gpt-4o".to_string()));
@@ -1956,6 +2095,7 @@ mod tests {
             false,
             false,
             vec![],
+            None,
             None,
             &args(&["fix", "the", "bug"]),
         );

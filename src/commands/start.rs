@@ -188,6 +188,7 @@ impl StartCommand {
                     claude_overrides: Default::default(),
                     env: (!env.is_empty()).then_some(env),
                     key_override: Some(key.value),
+                    codex_effort: None,
                 })
                 .await?;
             print_launch_preview(&plan);
@@ -219,6 +220,7 @@ impl StartCommand {
                 claude_overrides: Default::default(),
                 env: (!env.is_empty()).then_some(env),
                 key_override: Some(key.value),
+                codex_effort: None,
             })
             .await?;
 

@@ -491,6 +491,7 @@ pub async fn run() -> ! {
                     .max_context
                     .or_else(|| run_args.one_m.then(|| "1m".to_string()))
                     .or_else(|| run_args.two_m.then(|| "2m".to_string())),
+                run_args.effort,
                 &run_args.args,
             );
             // Pi defaults to the router; `--transparent` opts back into native.
@@ -612,6 +613,7 @@ pub async fn run() -> ! {
             let relogin = extracted.relogin;
             // Recovered from passthrough — `--resume` is not a clap arg (see `RunArgs`).
             let resume_selector = extracted.resume;
+            let effort = extracted.effort;
             let env_strings = extracted.env_strings;
             let remaining_args = extracted.remaining_args;
 
@@ -651,6 +653,12 @@ pub async fn run() -> ! {
                 if resume_selector.is_some() {
                     eprintln!(
                         "  {} --resume is ignored here; use `aivo code --resume` or `aivo <tool> --resume=<id>`",
+                        style::yellow("!")
+                    );
+                }
+                if effort.is_some() {
+                    eprintln!(
+                        "  {} --effort is ignored here; use `aivo codex --effort <level>`",
                         style::yellow("!")
                     );
                 }
@@ -829,6 +837,7 @@ pub async fn run() -> ! {
                         key_override,
                         resume_selector,
                         max_context,
+                        effort,
                     )
                     .await
             }

@@ -229,6 +229,8 @@ pub struct LaunchOptions {
     pub env: Option<HashMap<String, String>>,
     /// Temporary key override for this launch (does not persist to config)
     pub key_override: Option<ApiKey>,
+    /// Codex-family only: injected as `model_reasoning_effort`.
+    pub codex_effort: Option<String>,
 }
 
 /// Tool configuration including command and environment variables
@@ -394,6 +396,7 @@ impl AILauncher {
             &resolved.tool_config.env_vars,
             &self.cache,
             Some(resolved.key.base_url.as_str()),
+            options.codex_effort.as_deref(),
         )
         .await?;
 
@@ -731,12 +734,14 @@ impl AILauncher {
             &options.args,
             resolved.model.as_deref(),
             &resolved.tool_config.env_vars,
+            options.codex_effort.as_deref(),
         );
         let mut notes = build_preview_notes(
             options.tool,
             &options.args,
             resolved.model.as_deref(),
             &resolved.tool_config.env_vars,
+            options.codex_effort.as_deref(),
         );
 
         if options.tool.is_codex_family() {

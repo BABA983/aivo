@@ -235,6 +235,7 @@ impl RunCommand {
         key_override: Option<ApiKey>,
         resume_selector: Option<String>,
         max_context: Option<String>,
+        effort: Option<String>,
     ) -> ExitCode {
         match self
             .execute_internal(
@@ -249,6 +250,7 @@ impl RunCommand {
                 key_override,
                 resume_selector,
                 max_context,
+                effort,
             )
             .await
         {
@@ -274,6 +276,7 @@ impl RunCommand {
         key_override: Option<ApiKey>,
         resume_selector: Option<String>,
         max_context: Option<String>,
+        effort: Option<String>,
     ) -> anyhow::Result<ExitCode> {
         let mut model = model;
         let tool = match tool {
@@ -494,6 +497,34 @@ impl RunCommand {
             crate::services::transform_mode::set_active(false);
         }
 
+        let codex_effort = if ai_tool.is_codex_family() {
+            match resolve_codex_effort(
+                &self.cache,
+                key_override.as_ref().map(|k| k.base_url.as_str()),
+                launch_model.as_deref(),
+                effort,
+                dry_run,
+            )
+            .await
+            {
+                EffortResolution::Selected(level) => Some(level),
+                EffortResolution::Skipped => None,
+                EffortResolution::Cancelled => {
+                    eprintln!("{}", style::dim("Cancelled."));
+                    return Ok(ExitCode::Success);
+                }
+            }
+        } else {
+            if effort.is_some() {
+                eprintln!(
+                    "  {} --effort is ignored for {}",
+                    style::yellow("!"),
+                    ai_tool.as_str(),
+                );
+            }
+            None
+        };
+
         // Launch the AI tool
         let options = LaunchOptions {
             tool: ai_tool,
@@ -502,6 +533,7 @@ impl RunCommand {
             claude_overrides,
             env,
             key_override,
+            codex_effort,
         };
 
         if dry_run {
@@ -596,6 +628,12 @@ impl RunCommand {
             "key::model",
             "Same, as a bare first arg (only if `key` names a saved key)",
         );
+        if is("codex") || is("codex-app") {
+            print_opt(
+                "--effort [level]",
+                &label("Codex only: reasoning effort, e.g. medium/high/xhigh/max (bare = picker)"),
+            );
+        }
         if is("claude") {
             print_opt(
                 "--haiku-model [key::]m",
@@ -1250,6 +1288,93 @@ fn inject_codex(rendered: &RenderedContext, mut args: Vec<String>) -> Vec<String
             args.push(format!("{}{}", CONTEXT_PREAMBLE, rendered.text));
             args
         }
+    }
+}
+
+/// `Skipped` = flag absent or not applied; codex's own default applies.
+enum EffortResolution {
+    Selected(String),
+    Skipped,
+    Cancelled,
+}
+
+/// Picker levels when the model publishes none: codex 0.146's effort enum
+/// minus `none` (reasoning off) and the unreleased `ultra`.
+const CODEX_EFFORT_FALLBACK: [&str; 6] = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// Bare flag → picker over the model's published levels; an explicit level
+/// passes through verbatim (codex accepts arbitrary strings), warning when
+/// it isn't among the published ones.
+async fn resolve_codex_effort(
+    cache: &ModelsCache,
+    base_url: Option<&str>,
+    model: Option<&str>,
+    effort: Option<String>,
+    dry_run: bool,
+) -> EffortResolution {
+    let Some(effort) = effort else {
+        return EffortResolution::Skipped;
+    };
+    let published: Vec<String> = match model {
+        Some(m) => {
+            crate::services::model_metadata::resolve_limits(cache, base_url, m)
+                .await
+                .reasoning_efforts
+        }
+        None => Vec::new(),
+    };
+
+    if !effort.is_empty() {
+        if effort.chars().any(|c| c.is_control()) {
+            eprintln!(
+                "  {} --effort value contains control characters — ignored",
+                style::yellow("!")
+            );
+            return EffortResolution::Skipped;
+        }
+        if !published.is_empty() && !published.iter().any(|l| l == &effort) {
+            eprintln!(
+                "  {} '{}' isn't a published reasoning level for {} ({}) — passing it through anyway",
+                style::yellow("!"),
+                effort,
+                model.unwrap_or("this model"),
+                published.join(", "),
+            );
+        }
+        return EffortResolution::Selected(effort);
+    }
+
+    // Mirrors `-m`: --dry-run never opens a picker.
+    if dry_run {
+        eprintln!(
+            "  {} bare --effort skipped under --dry-run; pass --effort=<level>",
+            style::yellow("!")
+        );
+        return EffortResolution::Skipped;
+    }
+    let levels: Vec<String> = if published.is_empty() {
+        CODEX_EFFORT_FALLBACK
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        published
+    };
+    // Pre-select the catalog entry's default.
+    let default_idx = levels
+        .iter()
+        .position(|l| l == "medium")
+        .or_else(|| levels.iter().position(|l| l == "high"))
+        .unwrap_or(0);
+    use crate::tui::FuzzySelect;
+    match FuzzySelect::new()
+        .with_prompt("Select reasoning effort")
+        .items(&levels)
+        .default(default_idx)
+        .interact_opt()
+    {
+        Ok(Some(idx)) => EffortResolution::Selected(levels[idx].clone()),
+        Ok(None) | Err(_) => EffortResolution::Cancelled,
     }
 }
 

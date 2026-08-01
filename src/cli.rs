@@ -615,6 +615,10 @@ pub struct RunArgs {
     #[arg(long = "fable-model", value_name = "[KEY::]MODEL", num_args = 0..=1, default_missing_value = "")]
     pub fable_model: Option<String>,
 
+    /// Codex only: reasoning effort (e.g. medium, high, max); bare = picker.
+    #[arg(long = "effort", value_name = "LEVEL", num_args = 0..=1, default_missing_value = "")]
+    pub effort: Option<String>,
+
     /// Select API key by ID or name
     #[arg(
         short = 'k',
