@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.43.3
+
+A delegation and reasoning-control patch. Sub-agent delegation gets bounded worktree diffs and per-agent effort, `aivo codex` grows an `--effort` flag backed by a truthful model catalog, and `serve -k cursor` can run model-only for tool-less clients. Also: `/rewind` reverts files in cursor ACP sessions, `aivo login --reauth`, and fixes for cursor `set_model` catalog misses, engine-rebuild state loss, and CJK wrapping.
+
+- feat(code): delegation-quality batch for sub-agents (3f343037)
+- feat(codex): reasoning-effort control via `--effort` and a truthful model catalog (ba25ba25)
+- feat(serve): model-only mode for cursor keys (6e8b363f)
+- feat(code): `/rewind` file revert for cursor ACP sessions (48b3fffb)
+- feat(login): `--reauth` forces a fresh sign-in on a linked device (633703d9)
+- improve(login): spinner during login network waits (96afbe55)
+- fix: cursor `set_model` catalog miss, engine-rebuild state loss, CJK overflow (c2593a89)
+- fix(code): wrap long option descriptions in the question card (0f38b45a)
+
 ## v0.43.2
 
 A reliability and size patch. Cursor-backed code sessions no longer stall after an approved plan, and multi-vendor gateway routes keep the user-selected model instead of rewriting it. Also: a smaller binary via build-time compression of embedded assets, and a symmetric code TUI footer inset.
