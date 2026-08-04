@@ -108,6 +108,8 @@ fn agent_debug(msg: &str) {
 const MAX_TOUCHED_FILES: usize = 200;
 /// Cap on the agent's durable scratchpad (most-recent kept).
 const MAX_NOTES: usize = 50;
+/// Cap on verification-evidence records (one per validator command; latest wins).
+const MAX_EVIDENCE: usize = 8;
 
 /// Live progress for a parallel sub-agent batch, slot-tagged in call order.
 /// `Arc`-shared (`&self` + `Send + Sync`) so concurrent delegates report into one UI.
@@ -403,6 +405,10 @@ pub struct AgentEngine {
     /// to revise, dedup exact text). Pinned verbatim into compaction and rebuilt from
     /// the log on resume, so they outlive turns/summaries. Capped at [`MAX_NOTES`].
     pub(crate) notes: Vec<notes::Note>,
+    /// Observed self-verification outcomes (latest per command), pinned into
+    /// compaction folds and re-derived from `[self-verify]` marker lines on
+    /// resume/rewind. Capped at [`MAX_EVIDENCE`].
+    pub(crate) evidence: Vec<verify::EvidenceRecord>,
     /// Provider-measured token split (prompt/completion/cache) for the LAST turn,
     /// summed across steps. The chat TUI drains it (`take_turn_usage`) for `aivo stats`. Reset per turn.
     turn_usage: SessionTokens,
@@ -446,9 +452,10 @@ pub struct AgentEngine {
     /// Run the project's validator at declared-done and feed failures back. Default
     /// on for headless `-e` (`AIVO_AGENT_SELF_CORRECT=0` opts out), opt-in (`=1`) interactive.
     self_correct: bool,
-    /// Gates self-correct so investigate-only turns don't re-run the whole suite.
-    /// Starts true (tree state unknown); [`Self::set_verified_baseline`] clears it.
-    dirty_since_verify: bool,
+    /// Gates self-correct so investigate-only turns don't re-run the whole suite;
+    /// also stales pinned pass evidence. Starts true (tree state unknown);
+    /// [`Self::set_verified_baseline`] clears it.
+    pub(crate) dirty_since_verify: bool,
     /// Interactive chat only (off for headless/sub-agents): see [`CONFIRM_BEFORE_BUILD`].
     confirm_before_build: bool,
     /// First-party branding (aivo-starter): present as aivo, not the upstream model.

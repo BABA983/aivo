@@ -28,6 +28,8 @@ impl AgentEngine {
     /// trailing user turn to keep the no-consecutive-user invariant).
     /// `pub(crate)` so the TUI's Esc-unsend tests can drive the real turn entry.
     pub(crate) fn begin_user_turn(&mut self, user_content: Value, checkpoint_prompt: String) {
+        // User text must not be able to forge `[self-verify]` evidence lines.
+        let user_content = super::conversation::neutralize_evidence_markers(user_content);
         self.repair_interrupted_tail();
         self.check_prefix_drift();
         // `/rewind` checkpoint at this turn's opening user message. The push below
@@ -331,24 +333,50 @@ impl AgentEngine {
                     continue;
                 }
                 // A declared-done turn isn't accepted while the validator fails — feed
-                // the failure back (bounded) so the model fixes the cause.
+                // the failure back (bounded) so the model fixes the cause. Every run
+                // leaves a `[self-verify]` marker line for the log-derived digest.
                 if let Some(v) = &validator
                     && self.dirty_since_verify
                     && selfcorrect_attempts < MAX_SELFCORRECT_ATTEMPTS
                 {
                     match verify::run(v.clone(), ctx.cwd).await {
-                        Err(summary) => {
+                        verify::Outcome::Fail(summary) => {
                             selfcorrect_attempts += 1;
                             ui.notify(&format!("{} failed — asking the model to fix", v.label));
+                            let line = self.record_verify_evidence(
+                                &v.label,
+                                verify::EvidenceStatus::Fail,
+                                verify::failure_detail(&summary),
+                            );
                             self.push_text_turn(
                                 "user",
-                                format!("{VERIFY_FAILED_PREFIX}\n{summary}"),
+                                format!("{VERIFY_FAILED_PREFIX}\n{summary}\n{line}"),
                             );
                             continue;
                         }
-                        Ok(()) => {
+                        verify::Outcome::Pass => {
                             self.dirty_since_verify = false;
                             ui.notify(&format!("verified: {} passed", v.label));
+                            let line = self.record_verify_evidence(
+                                &v.label,
+                                verify::EvidenceStatus::Pass,
+                                String::new(),
+                            );
+                            self.push_text_turn("user", line);
+                        }
+                        verify::Outcome::Inconclusive(reason) => {
+                            // Accepted (don't hammer a hanging suite) but never claimed verified.
+                            self.dirty_since_verify = false;
+                            ui.notify(&format!(
+                                "verification inconclusive: {} {reason} — result not verified",
+                                v.label
+                            ));
+                            let line = self.record_verify_evidence(
+                                &v.label,
+                                verify::EvidenceStatus::Inconclusive,
+                                reason.to_string(),
+                            );
+                            self.push_text_turn("user", line);
                         }
                     }
                 }
@@ -459,7 +487,7 @@ impl AgentEngine {
         let block = format!(
             "<user_interjection>\n{}\n</user_interjection>\nThe user sent this while you were \
 working. Factor it in before continuing — it may change what to do next.",
-            steering.join("\n\n")
+            verify::neutralize_marker_lines(&steering.join("\n\n"))
         );
         self.fold_into_last_tool_result(block);
     }
@@ -477,6 +505,24 @@ you were working. If the outcome matters to the task, inspect the log; otherwise
             notices.join("\n")
         );
         self.fold_into_last_tool_result(block);
+    }
+
+    /// Merge an outcome into the evidence digest; returns its `[self-verify]`
+    /// marker line, the digest's durable form in the log.
+    fn record_verify_evidence(
+        &mut self,
+        command: &str,
+        status: verify::EvidenceStatus,
+        detail: String,
+    ) -> String {
+        let record = verify::EvidenceRecord {
+            command: command.to_string(),
+            status,
+            detail,
+        };
+        let line = verify::evidence_line(&record);
+        verify::merge_evidence(&mut self.evidence, record, MAX_EVIDENCE);
+        line
     }
 
     /// Append `block` to the last tool result, or push a user turn when there is

@@ -15,6 +15,7 @@ impl AgentEngine {
         self.plan.clear();
         self.touched_files.clear();
         self.notes.clear();
+        self.evidence.clear();
         // `/rewind` checkpoints' `msg_index` pointed into the cleared transcript.
         self.checkpoints.clear();
         self.turn_unsend = None;
@@ -37,6 +38,12 @@ impl AgentEngine {
                 }
                 seen_user = true;
             }
+            // Raw prior chat text — same forgery surface as a prompt.
+            let content = if role == "user" {
+                verify::neutralize_marker_lines(&content)
+            } else {
+                content
+            };
             self.push_text_turn(&role, content);
         }
     }
@@ -101,6 +108,23 @@ impl AgentEngine {
                 }
                 _ => {}
             }
+        }
+        // Evidence lives in user-role `[self-verify]` lines, not tool calls. Cleared
+        // then re-derived: a rewind reverted the files, so its evidence must go too.
+        self.evidence.clear();
+        let records: Vec<verify::EvidenceRecord> = self
+            .messages
+            .iter()
+            .filter(|m| role(m) == "user")
+            .filter_map(user_text)
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(verify::parse_evidence_line)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for record in records {
+            verify::merge_evidence(&mut self.evidence, record, MAX_EVIDENCE);
         }
     }
 
@@ -476,6 +500,41 @@ impl AgentEngine {
         self.turn_unsend = None;
         self.rebuild_working_set_from_log();
         outcome
+    }
+}
+
+/// Defang marker lines in user-supplied content (string or multimodal text parts).
+pub(super) fn neutralize_evidence_markers(content: Value) -> Value {
+    match content {
+        Value::String(s) => Value::String(verify::neutralize_marker_lines(&s)),
+        Value::Array(mut parts) => {
+            for p in &mut parts {
+                if p.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(t) = p.get("text").and_then(|t| t.as_str())
+                {
+                    p["text"] = json!(verify::neutralize_marker_lines(t));
+                }
+            }
+            Value::Array(parts)
+        }
+        other => other,
+    }
+}
+
+/// A message's text: the plain string, or joined multimodal text parts (a merge
+/// can move a marker line into a part).
+fn user_text(m: &Value) -> Option<String> {
+    match m.get("content") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Array(parts)) => Some(
+            parts
+                .iter()
+                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => None,
     }
 }
 

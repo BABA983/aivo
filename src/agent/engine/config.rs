@@ -61,6 +61,7 @@ impl AgentEngine {
             plan: Vec::new(),
             touched_files: Vec::new(),
             notes: Vec::new(),
+            evidence: Vec::new(),
             turn_usage: SessionTokens::default(),
             checkpoints: Vec::new(),
             turn_unsend: None,

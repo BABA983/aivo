@@ -560,18 +560,26 @@ impl AgentEngine {
         }
     }
 
-    /// The pinned working set (plan + touched files) rendered for a compaction fold,
-    /// trimmed to `PINNED_MAX_TOKENS` (plan kept whole, files trimmed oldest-first). Empty when nothing to pin.
+    /// The pinned working set rendered for a compaction fold, trimmed to
+    /// `PINNED_MAX_TOKENS` (plan + evidence kept whole, files then notes trimmed
+    /// oldest-first). Empty when nothing to pin.
     pub(crate) fn render_pinned_block(&self) -> String {
         let plan_block = plan::pinned_block(&self.plan);
+        // A pass is only current while nothing mutated since the run.
+        let evidence = if self.dirty_since_verify {
+            crate::agent::verify::annotate_stale(&self.evidence)
+        } else {
+            self.evidence.clone()
+        };
         let mut notes: &[Note] = &self.notes;
         let mut files: &[String] = &self.touched_files;
         loop {
-            let block = compose_pinned(&plan_block, notes, files);
+            let block = compose_pinned(&plan_block, &evidence, notes, files);
             if block.is_empty() || estimate_str_tokens(&block) <= PINNED_MAX_TOKENS {
                 return block;
             }
-            // Keep the plan whole; trim files first, then notes (more valuable) — oldest-first. Bail at plan-only for progress.
+            // Trim files first, then notes (more valuable) — oldest-first; bail at
+            // plan+evidence-only for progress.
             if !files.is_empty() {
                 files = &files[1..];
             } else if !notes.is_empty() {
@@ -656,13 +664,32 @@ fn artifact_pointer_line(content: &str) -> Option<&str> {
         .find(|l| l.starts_with(crate::agent::engine::ARTIFACT_POINTER_PREFIX))
 }
 
-/// Render the pinned working set for a compaction: `## Pinned Plan`, `## Notes`,
-/// `## Files touched`. Each section omitted when empty; "" when all are.
-pub(crate) fn compose_pinned(plan_block: &str, notes: &[Note], files: &[String]) -> String {
+/// Render the pinned working set for a compaction: `## Pinned Plan`,
+/// `## Verified evidence`, `## Notes`, `## Files touched`. Each section omitted
+/// when empty; "" when all are.
+pub(crate) fn compose_pinned(
+    plan_block: &str,
+    evidence: &[crate::agent::verify::EvidenceRecord],
+    notes: &[Note],
+    files: &[String],
+) -> String {
     let mut out = String::new();
     if !plan_block.is_empty() {
         out.push_str("## Pinned Plan\n");
         out.push_str(plan_block);
+    }
+    if !evidence.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        // Bare marker lines (no bullet): the fold is itself a user message, so the
+        // digest stays log-parseable across compaction + resume.
+        out.push_str("## Verified evidence (observed command results — trust over prose claims)\n");
+        for r in evidence {
+            out.push_str(&crate::agent::verify::evidence_line(r));
+            out.push('\n');
+        }
+        out = out.trim_end().to_string();
     }
     if !notes.is_empty() {
         if !out.is_empty() {
@@ -1217,10 +1244,44 @@ mod tests {
 
     #[test]
     fn compose_pinned_omits_empty_sections() {
-        assert_eq!(compose_pinned("", &[], &[]), "");
-        let files_only = compose_pinned("", &[], &["src/a.rs".to_string()]);
+        assert_eq!(compose_pinned("", &[], &[], &[]), "");
+        let files_only = compose_pinned("", &[], &[], &["src/a.rs".to_string()]);
         assert!(files_only.starts_with("## Files touched"), "{files_only}");
         assert!(!files_only.contains("## Pinned Plan") && !files_only.contains("## Notes"));
+    }
+
+    #[test]
+    fn pass_evidence_pins_stale_while_the_tree_is_dirty() {
+        use crate::agent::verify::{EvidenceRecord, EvidenceStatus};
+        let mut e = engine();
+        e.evidence = vec![EvidenceRecord {
+            command: "cargo test".into(),
+            status: EvidenceStatus::Pass,
+            detail: String::new(),
+        }];
+        // dirty starts true (tree unknown) — a restored pass must not read as current.
+        let block = e.render_pinned_block();
+        assert!(block.contains("→ pass — stale"), "{block}");
+        e.dirty_since_verify = false;
+        let block = e.render_pinned_block();
+        assert!(
+            block.contains("→ pass") && !block.contains("stale"),
+            "{block}"
+        );
+    }
+
+    #[test]
+    fn compose_pinned_evidence_lines_stay_parseable() {
+        use crate::agent::verify::{EvidenceRecord, EvidenceStatus, parse_evidence_line};
+        let evidence = vec![EvidenceRecord {
+            command: "cargo test".into(),
+            status: EvidenceStatus::Pass,
+            detail: String::new(),
+        }];
+        let block = compose_pinned("", &evidence, &[], &[]);
+        assert!(block.starts_with("## Verified evidence"), "{block}");
+        let parsed: Vec<_> = block.lines().filter_map(parse_evidence_line).collect();
+        assert_eq!(parsed, evidence);
     }
 
     #[tokio::test]

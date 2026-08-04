@@ -66,7 +66,8 @@ fn grep_fallback_skips_symlinks() {
     write_file(&json!({"path":"f.txt","content":"needle"}), &dir).unwrap();
     std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
     let mut out = Vec::new();
-    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut usize::MAX);
+    let mut budget = usize::MAX;
+    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut budget);
     assert!(
         out.iter().any(|l| l.contains("f.txt")),
         "missing match: {out:?}"
@@ -84,7 +85,8 @@ fn grep_fallback_skips_fifo() {
     write_file(&json!({"path":"f.txt","content":"needle"}), &dir).unwrap();
     mkfifo(&dir.join("pipe"));
     let mut out = Vec::new();
-    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut usize::MAX);
+    let mut budget = usize::MAX;
+    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut budget);
     assert!(
         out.iter().any(|l| l.contains("f.txt")),
         "missing match: {out:?}"
