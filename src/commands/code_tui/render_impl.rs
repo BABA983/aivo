@@ -2741,7 +2741,7 @@ impl CodeTuiApp {
         Line::from(spans)
     }
 
-    /// The pinned plan/task-list panel's content lines (the `Plan N/M done`
+    /// The pinned plan/task-list panel's content lines (the `Tasks N/M done`
     /// header plus one line per step), or empty when there's no plan or the plan
     /// is fully done. Built fresh each frame — it's small, and the plan changes
     /// rarely.

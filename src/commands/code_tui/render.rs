@@ -1448,7 +1448,7 @@ pub(super) fn tool_action_label(name: &str, args: &serde_json::Value, cwd: &str)
         };
     }
     if name == "update_plan" {
-        return "updating the plan".to_string();
+        return "updating tasks".to_string();
     }
     if name == "skill" {
         let s = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -2767,7 +2767,7 @@ fn plan_more_line(n: usize) -> StyledLine {
     )])
 }
 
-/// Render an `update_plan` checklist card: a "Plan N/M done" header over one
+/// Render an `update_plan` checklist card: a "Tasks N/M done" header over one
 /// line per step, each prefixed by a status glyph (done = green ✔, active =
 /// teal ▸, pending = muted ○). Completed steps are dimmed and struck through so
 /// the eye lands on what's left. Over `PLAN_MAX_VISIBLE` steps windows to the
@@ -2786,7 +2786,7 @@ pub(super) fn render_plan(lines: &mut Vec<StyledLine>, content: &str) {
         .count();
     lines.push(line_with_plain(vec![
         Span::styled(
-            "Plan".to_string(),
+            "Tasks".to_string(),
             Style::default().fg(TEXT()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(

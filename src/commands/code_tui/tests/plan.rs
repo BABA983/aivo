@@ -104,7 +104,7 @@ fn test_plan_renders_in_pinned_panel_not_inline() {
     // inline in the transcript (where it would scroll away under later content).
     let inline = app.build_transcript().plain_lines.join("\n");
     assert!(
-        !inline.contains("Plan") && !inline.contains("scan code"),
+        !inline.contains("Tasks") && !inline.contains("scan code"),
         "plan leaked into the inline transcript:\n{inline}"
     );
 
@@ -125,7 +125,7 @@ fn test_plan_renders_in_pinned_panel_not_inline() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(screen.contains("Plan"), "panel header missing:\n{screen}");
+    assert!(screen.contains("Tasks"), "panel header missing:\n{screen}");
     assert!(
         screen.contains("1/3 done"),
         "panel progress missing:\n{screen}"
@@ -152,7 +152,7 @@ fn test_completed_plan_hidden_from_panel() {
     });
     let screen = render_screen(&mut app, 80, 20);
     assert!(
-        !screen.contains("Plan") && !screen.contains("scan code"),
+        !screen.contains("Tasks") && !screen.contains("scan code"),
         "a fully-done plan must not stay pinned:\n{screen}"
     );
 }
