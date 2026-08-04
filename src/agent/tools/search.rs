@@ -2,20 +2,45 @@
 
 use super::*;
 
-pub(super) fn glob(args: &Value, cwd: &Path) -> Result<String, String> {
-    let pattern = arg_str(args, "pattern")?;
+pub(super) async fn glob(args: &Value, cwd: &Path) -> Result<String, String> {
+    let pattern = arg_str(args, "pattern")?.to_string();
     let base = resolve(cwd, arg_str_opt(args, "path").unwrap_or("."));
-    let mut out = Vec::new();
-    walk_glob(&base, &base, pattern, &mut out);
+    // Sync fs recursion — inline on the current-thread runtime it would freeze the whole TUI.
+    let (mut out, capped) = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut budget = WALK_VISIT_CAP;
+        walk_glob(&base, &base, &pattern, &mut out, &mut budget);
+        (out, budget == 0)
+    })
+    .await
+    .map_err(|e| format!("glob: {e}"))?;
     out.sort();
+    let note = if capped {
+        walk_capped_note()
+    } else {
+        String::new()
+    };
     if out.is_empty() {
-        return Ok("(no matches)".to_string());
+        return Ok(format!("(no matches){note}"));
     }
-    Ok(cap_head(out.join("\n")))
+    Ok(cap_head(out.join("\n")) + &note)
 }
 
-pub(super) fn walk_glob(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>) {
-    if out.len() >= GLOB_CAP {
+/// Appended when the visit budget ran out, so partial results don't read as exhaustive.
+pub(super) fn walk_capped_note() -> String {
+    format!(
+        "\n(stopped after visiting {WALK_VISIT_CAP} directory entries — results may be incomplete; narrow `path`)"
+    )
+}
+
+pub(super) fn walk_glob(
+    root: &Path,
+    dir: &Path,
+    pattern: &str,
+    out: &mut Vec<String>,
+    budget: &mut usize,
+) {
+    if out.len() >= GLOB_CAP || *budget == 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
@@ -24,6 +49,10 @@ pub(super) fn walk_glob(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<St
     let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         let path = e.path();
         // `file_type()` reads the entry's own type WITHOUT following the link, so
         // a symlinked directory is treated as a leaf and never descended into.
@@ -46,7 +75,7 @@ pub(super) fn walk_glob(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<St
             }
         }
         if is_dir {
-            walk_glob(root, &path, pattern, out);
+            walk_glob(root, &path, pattern, out, budget);
         }
     }
 }
@@ -133,12 +162,24 @@ pub(super) async fn grep(args: &Value, cwd: &Path) -> Result<String, String> {
 
     // No external tool: literal-substring walk (also skips IGNORED_DIRS only).
     let base = resolve(cwd, path);
-    let mut out = Vec::new();
-    grep_fallback(&base, &base, pattern, context, &mut out);
+    let needle = pattern.to_string();
+    let (out, capped) = tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut budget = WALK_VISIT_CAP;
+        grep_fallback(&base, &base, &needle, context, &mut out, &mut budget);
+        (out, budget == 0)
+    })
+    .await
+    .map_err(|e| format!("grep: {e}"))?;
+    let note = if capped {
+        walk_capped_note()
+    } else {
+        String::new()
+    };
     if out.is_empty() {
-        return Ok("(no matches)".to_string());
+        return Ok(format!("(no matches){note}"));
     }
-    Ok(cap_head(out.join("\n")))
+    Ok(cap_head(out.join("\n")) + &note)
 }
 
 pub(super) fn grep_result(out: String) -> String {
@@ -155,14 +196,19 @@ pub(super) fn grep_fallback(
     needle: &str,
     context: usize,
     out: &mut Vec<String>,
+    budget: &mut usize,
 ) {
-    if out.len() >= GLOB_CAP {
+    if out.len() >= GLOB_CAP || *budget == 0 {
         return;
     }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for e in rd.filter_map(|e| e.ok()) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
         // Skip symlinks during traversal, matching ripgrep's default (the grep
         // fast path) — so the pure-Rust fallback searches the SAME file set as
         // rg, and a symlinked directory cycle (`loop -> .`) can't recurse until
@@ -177,7 +223,7 @@ pub(super) fn grep_fallback(
         let name = e.file_name();
         if ft.is_dir() {
             if !IGNORED_DIRS.contains(&name.to_string_lossy().as_ref()) {
-                grep_fallback(root, &path, needle, context, out);
+                grep_fallback(root, &path, needle, context, out, budget);
             }
             continue;
         }

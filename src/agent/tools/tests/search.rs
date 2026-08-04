@@ -2,27 +2,27 @@ use super::super::*;
 use super::helpers::*;
 use serde_json::json;
 
-#[test]
-fn glob_recursive_and_flat() {
+#[tokio::test]
+async fn glob_recursive_and_flat() {
     let dir = tmp();
     write_file(&json!({"path":"src/main.rs","content":"x"}), &dir).unwrap();
     write_file(&json!({"path":"src/lib/util.rs","content":"x"}), &dir).unwrap();
     write_file(&json!({"path":"top.rs","content":"x"}), &dir).unwrap();
-    let all = glob(&json!({"pattern":"**/*.rs"}), &dir).unwrap();
+    let all = glob(&json!({"pattern":"**/*.rs"}), &dir).await.unwrap();
     assert!(all.contains("src/main.rs"));
     assert!(all.contains("src/lib/util.rs"));
     assert!(all.contains("top.rs"));
-    let flat = glob(&json!({"pattern":"*.rs"}), &dir).unwrap();
+    let flat = glob(&json!({"pattern":"*.rs"}), &dir).await.unwrap();
     assert!(flat.contains("top.rs"));
     assert!(!flat.contains("src/main.rs"));
 }
 
-#[test]
-fn glob_skips_ignored_dirs() {
+#[tokio::test]
+async fn glob_skips_ignored_dirs() {
     let dir = tmp();
     write_file(&json!({"path":"node_modules/dep/x.rs","content":"x"}), &dir).unwrap();
     write_file(&json!({"path":"keep.rs","content":"x"}), &dir).unwrap();
-    let out = glob(&json!({"pattern":"**/*.rs"}), &dir).unwrap();
+    let out = glob(&json!({"pattern":"**/*.rs"}), &dir).await.unwrap();
     assert!(out.contains("keep.rs"));
     assert!(!out.contains("node_modules"));
 }
@@ -31,14 +31,28 @@ fn glob_skips_ignored_dirs() {
 /// recurse forever (stack overflow): symlinked directories are never
 /// descended into. The walk terminating at all is the real assertion.
 #[cfg(unix)]
-#[test]
-fn glob_does_not_follow_symlink_cycle() {
+#[tokio::test]
+async fn glob_does_not_follow_symlink_cycle() {
     let dir = tmp();
     write_file(&json!({"path":"real.rs","content":"x"}), &dir).unwrap();
     std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
-    let out = glob(&json!({"pattern":"**/*.rs"}), &dir).unwrap();
+    let out = glob(&json!({"pattern":"**/*.rs"}), &dir).await.unwrap();
     assert!(out.contains("real.rs"));
     assert!(!out.contains("loop/"), "descended through a symlink: {out}");
+}
+
+/// The visit budget stops a walk with few matches but many entries.
+#[test]
+fn walk_glob_stops_at_visit_budget() {
+    let dir = tmp();
+    for i in 0..10 {
+        write_file(&json!({"path": format!("f{i}.txt"), "content":"x"}), &dir).unwrap();
+    }
+    let mut out = Vec::new();
+    let mut budget = 3;
+    walk_glob(&dir, &dir, "**/*.txt", &mut out, &mut budget);
+    assert_eq!(budget, 0, "budget should be exhausted");
+    assert!(out.len() <= 3, "visited past the budget: {out:?}");
 }
 
 /// The pure-Rust grep fallback skips symlinks during traversal — both so it
@@ -52,7 +66,7 @@ fn grep_fallback_skips_symlinks() {
     write_file(&json!({"path":"f.txt","content":"needle"}), &dir).unwrap();
     std::os::unix::fs::symlink(&dir, dir.join("loop")).unwrap();
     let mut out = Vec::new();
-    grep_fallback(&dir, &dir, "needle", 0, &mut out);
+    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut usize::MAX);
     assert!(
         out.iter().any(|l| l.contains("f.txt")),
         "missing match: {out:?}"
@@ -70,7 +84,7 @@ fn grep_fallback_skips_fifo() {
     write_file(&json!({"path":"f.txt","content":"needle"}), &dir).unwrap();
     mkfifo(&dir.join("pipe"));
     let mut out = Vec::new();
-    grep_fallback(&dir, &dir, "needle", 0, &mut out);
+    grep_fallback(&dir, &dir, "needle", 0, &mut out, &mut usize::MAX);
     assert!(
         out.iter().any(|l| l.contains("f.txt")),
         "missing match: {out:?}"

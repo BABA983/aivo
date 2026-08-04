@@ -43,6 +43,9 @@ pub(crate) const MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
 /// Max paths returned from `glob`.
 const GLOB_CAP: usize = 500;
 
+/// Max entries a glob/grep-fallback walk visits — GLOB_CAP bounds matches, not the tree walked.
+const WALK_VISIT_CAP: usize = 100_000;
+
 const BASH_DEFAULT_TIMEOUT: u64 = 120;
 
 const BASH_MAX_TIMEOUT: u64 = 600;
@@ -153,7 +156,7 @@ pub async fn execute(name: &str, args: &Value, cwd: &Path) -> Result<String, Str
     match name {
         "read_file" => read_file(args, cwd),
         "list_dir" => list_dir(args, cwd),
-        "glob" => glob(args, cwd),
+        "glob" => glob(args, cwd).await,
         "grep" => grep(args, cwd).await,
         "write_file" => write_file(args, cwd),
         "edit_file" => edit_file(args, cwd),
