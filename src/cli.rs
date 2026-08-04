@@ -689,8 +689,9 @@ pub struct RunArgs {
     #[arg(long)]
     pub transform: bool,
 
-    /// Pi only: opt out of the default transform router and talk to the
-    /// upstream natively (transparent passthrough).
+    /// Bypass aivo's local router and talk to the upstream natively
+    /// (transparent passthrough). The endpoint must speak the tool's
+    /// native protocol; keys that need the router are rejected.
     #[arg(long)]
     pub transparent: bool,
 

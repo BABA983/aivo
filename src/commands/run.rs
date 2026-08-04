@@ -497,6 +497,16 @@ impl RunCommand {
             crate::services::transform_mode::set_active(false);
         }
 
+        if crate::services::transform_mode::is_transparent()
+            && crate::services::http_debug::is_debug_active()
+        {
+            eprintln!(
+                "  {} --transparent is ignored with --debug (the JSONL logger needs the router)",
+                style::yellow("!"),
+            );
+            crate::services::transform_mode::set_transparent(false);
+        }
+
         let codex_effort = if ai_tool.is_codex_family() {
             match resolve_codex_effort(
                 &self.cache,
@@ -697,12 +707,10 @@ impl RunCommand {
         print_opt("-r, --refresh", "Bypass cache and fetch fresh model list");
         print_opt("--env <k=v>", "Inject environment variable");
         print_opt("--dry-run", "Print the resolved command without launching");
-        if is("pi") {
-            print_opt(
-                "--transparent",
-                &label("Pi only: bypass the router (talk natively)"),
-            );
-        }
+        print_opt(
+            "--transparent",
+            "Bypass aivo's local router; the endpoint must speak the tool's native protocol",
+        );
 
         if generic {
             println!();

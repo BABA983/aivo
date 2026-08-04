@@ -115,7 +115,7 @@ Key flags:
 --env <k=v>                inject an environment variable
 --relogin                  force OAuth re-login (codex / codex-app / claude)
 --dry-run                  print the resolved command + env without launching
---transparent              pi only: bypass the router, talk to the model natively
+--transparent              bypass aivo's local router, talk to the model natively (endpoint must speak the tool's native protocol; copilot/starter/cursor/ollama keys rejected)
 ```
 
 Claude-only model-slot overrides: `--fable-model`, `--subagent-model`, and

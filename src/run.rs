@@ -500,6 +500,7 @@ pub async fn run() -> ! {
             let transparent = run_args.transparent || extracted.transparent;
             let transform_on = run_args.transform || extracted.transform || is_pi;
             services::transform_mode::set_active(transform_on && !transparent);
+            services::transform_mode::set_transparent(transparent);
             // After extract_aivo_flags so `--debug` after the tool name
             // (recovered from passthrough) activates the logger too.
             maybe_init_http_debug(&extracted.debug).await;

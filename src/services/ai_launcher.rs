@@ -818,6 +818,44 @@ impl AILauncher {
         )
         .await;
 
+        if crate::services::transform_mode::is_transparent()
+            && options.tool != AIToolType::Pi
+            && !crate::services::http_debug::is_debug_active()
+        {
+            let profile = crate::services::provider_profile::provider_profile_for_key(&key);
+            let conflict = if options.tool == AIToolType::Claude
+                && !options.claude_overrides.tier_upstreams.is_empty()
+            {
+                Some("per-tier model overrides dispatch by model in the local router".to_string())
+            } else {
+                crate::services::router_selection::transparent_conflict(
+                    options.tool,
+                    &key,
+                    &profile,
+                )
+            };
+            if let Some(reason) = conflict {
+                let message = if reason.is_empty() {
+                    format!(
+                        "--transparent can't be used with key '{}'.",
+                        key.display_name()
+                    )
+                } else {
+                    format!(
+                        "--transparent can't be used with key '{}': {reason}.",
+                        key.display_name()
+                    )
+                };
+                return Err(CLIError::new(
+                    message,
+                    ErrorCategory::User,
+                    None::<String>,
+                    Some("Drop --transparent to use aivo's local router."),
+                )
+                .into());
+            }
+        }
+
         if is_ollama_base(&key.base_url) {
             // Ollama is always OpenAI-compatible; no protocol probing needed.
         } else if options.tool == AIToolType::Claude {

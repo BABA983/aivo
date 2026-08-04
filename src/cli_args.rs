@@ -286,7 +286,6 @@ pub(crate) struct ExtractedFlags {
     /// `None` = flag absent. `Some("1m")` = activate the 1M-context spoof.
     pub(crate) max_context: Option<String>,
     pub(crate) transform: bool,
-    /// Pi only: `--transparent` opts out of the default transform router.
     pub(crate) transparent: bool,
 }
 

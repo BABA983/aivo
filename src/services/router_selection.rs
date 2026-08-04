@@ -45,6 +45,9 @@ pub(crate) fn use_direct_anthropic_for_claude(key: &ApiKey) -> bool {
     if crate::services::http_debug::is_debug_active() {
         return false;
     }
+    if crate::services::transform_mode::is_transparent() {
+        return true;
+    }
     if !is_anthropic_endpoint(&key.base_url) {
         return false;
     }
@@ -61,6 +64,9 @@ pub(crate) fn use_direct_openai_for_codex(key: &ApiKey) -> bool {
     if crate::services::http_debug::is_debug_active() {
         return false;
     }
+    if crate::services::transform_mode::is_transparent() {
+        return true;
+    }
     match key.codex_mode {
         Some(OpenAICompatibilityMode::Direct) => true,
         Some(OpenAICompatibilityMode::Router) => false,
@@ -74,6 +80,9 @@ pub(crate) fn use_google_native_for_gemini(key: &ApiKey) -> bool {
     // instrumented with `.send_logged()`).
     if crate::services::http_debug::is_debug_active() {
         return false;
+    }
+    if crate::services::transform_mode::is_transparent() {
+        return true;
     }
     // Same invariant as use_direct_anthropic_for_claude: only a genuinely
     // Google-native endpoint may skip the router.
@@ -93,7 +102,47 @@ pub(crate) fn use_router_for_opencode(key: &ApiKey) -> bool {
     if crate::services::http_debug::is_debug_active() {
         return true;
     }
+    if crate::services::transform_mode::is_transparent() {
+        return false;
+    }
     matches!(key.opencode_mode, Some(OpenAICompatibilityMode::Router))
+}
+
+/// `--transparent` preflight: Some(reason) when the key is router-bound.
+pub(crate) fn transparent_conflict(
+    tool: crate::services::ai_launcher::AIToolType,
+    key: &ApiKey,
+    profile: &ProviderProfile,
+) -> Option<String> {
+    use crate::services::ai_launcher::AIToolType;
+    if key.is_cursor_acp() {
+        return Some(
+            "cursor keys speak ACP, not HTTP — there is no upstream to talk to directly"
+                .to_string(),
+        );
+    }
+    if profile.serve_flags.is_copilot {
+        return Some(
+            "GitHub Copilot auth (token exchange + headers) lives in the local router".to_string(),
+        );
+    }
+    // Deliberately reasonless.
+    if profile.serve_flags.is_starter {
+        return Some(String::new());
+    }
+    if profile.kind == ProviderKind::Ollama && tool != AIToolType::Opencode {
+        return Some(format!(
+            "Ollama speaks OpenAI chat only — {} needs the conversion router",
+            tool.as_str()
+        ));
+    }
+    if profile.serve_flags.is_openrouter && tool == AIToolType::Claude {
+        return Some(
+            "OpenRouter speaks the OpenAI protocol — claude needs the conversion router"
+                .to_string(),
+        );
+    }
+    None
 }
 
 pub(crate) fn routed_protocol_for_claude(key: &ApiKey) -> ProviderProtocol {
@@ -206,15 +255,14 @@ mod tests {
         )
     }
 
-    /// All `use_direct_*` predicates consult `is_debug_active()`. The
-    /// debug-toggling tests serialize via `DEBUG_TEST_MUTEX`; tests that
-    /// assume the debug flag is off must take the same mutex (and explicitly
-    /// reset the flag) to avoid racing with parallel toggles.
+    /// Tests toggling or assuming the debug/transparent globals serialize
+    /// via `DEBUG_TEST_MUTEX`; both flags reset here.
     fn debug_off_guard() -> std::sync::MutexGuard<'static, ()> {
         let guard = crate::services::http_debug::DEBUG_TEST_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         crate::services::http_debug::set_test_debug_active(false);
+        crate::services::transform_mode::set_transparent(false);
         guard
     }
 
@@ -278,5 +326,65 @@ mod tests {
         let mut key = test_api_key("https://generativelanguage.googleapis.com/v1beta");
         pin_route(&mut key, "gemini", "openai");
         assert!(!use_google_native_for_gemini(&key));
+    }
+
+    #[test]
+    fn transparent_forces_direct_on_generic_hosts_and_over_pins() {
+        let _guard = debug_off_guard();
+        crate::services::transform_mode::set_transparent(true);
+
+        let mut key = test_api_key("https://api.example.com/v1");
+        assert!(use_direct_anthropic_for_claude(&key));
+        assert!(use_direct_openai_for_codex(&key));
+        assert!(use_google_native_for_gemini(&key));
+        assert!(!use_router_for_opencode(&key));
+
+        key.codex_mode = Some(OpenAICompatibilityMode::Router);
+        key.opencode_mode = Some(OpenAICompatibilityMode::Router);
+        pin_route(&mut key, "claude", "openai");
+        assert!(use_direct_openai_for_codex(&key));
+        assert!(!use_router_for_opencode(&key));
+        assert!(use_direct_anthropic_for_claude(&key));
+
+        crate::services::transform_mode::set_transparent(false);
+    }
+
+    #[test]
+    fn debug_beats_transparent() {
+        let _guard = debug_off_guard();
+        crate::services::http_debug::set_test_debug_active(true);
+        crate::services::transform_mode::set_transparent(true);
+
+        let key = test_api_key("https://api.example.com/v1");
+        assert!(!use_direct_anthropic_for_claude(&key));
+        assert!(!use_direct_openai_for_codex(&key));
+        assert!(!use_google_native_for_gemini(&key));
+        assert!(use_router_for_opencode(&key));
+
+        crate::services::http_debug::set_test_debug_active(false);
+        crate::services::transform_mode::set_transparent(false);
+    }
+
+    #[test]
+    fn transparent_conflict_rejects_router_bound_keys() {
+        use crate::services::ai_launcher::AIToolType;
+        let reject = |base_url: &str, tool: AIToolType| {
+            let key = test_api_key(base_url);
+            let profile = provider_profile_for_key(&key);
+            transparent_conflict(tool, &key, &profile)
+        };
+
+        assert!(reject("copilot", AIToolType::Codex).is_some());
+        assert!(reject("aivo-starter", AIToolType::Claude).is_some());
+        assert!(reject("cursor", AIToolType::Claude).is_some());
+        assert!(reject("ollama", AIToolType::Codex).is_some());
+        assert!(reject("ollama", AIToolType::Claude).is_some());
+        assert!(reject("ollama", AIToolType::Gemini).is_some());
+        assert!(reject("ollama", AIToolType::Opencode).is_none());
+        assert!(reject("https://openrouter.ai/api/v1", AIToolType::Claude).is_some());
+        assert!(reject("https://openrouter.ai/api/v1", AIToolType::Codex).is_none());
+        assert!(reject("https://openrouter.ai/api/v1", AIToolType::Opencode).is_none());
+        assert!(reject("https://api.example.com/v1", AIToolType::Codex).is_none());
+        assert!(reject("https://api.anthropic.com", AIToolType::Claude).is_none());
     }
 }
