@@ -1531,7 +1531,7 @@ fn test_subagents_render_individually_not_coalesced() {
     // The result previews the report's first line after the fold toggle — not a
     // bare count alone that says nothing about what the subagent found.
     assert!(
-        plain.contains("▸ +3 lines · ## Findings"),
+        plain.contains("▸\u{a0}+3 lines · ## Findings"),
         "subagent result preview missing: {plain}"
     );
 }

@@ -259,6 +259,9 @@ impl CodeTuiApp {
         let (inline_result, consumed_results, split_calls) =
             self.parallel_batch_pairing(render_len);
 
+        // The previous lone tool call's `→` row — the row an adjacent result
+        // merges onto instead of spending a `⎿` line.
+        let mut merge_anchor: Option<usize> = None;
         let mut idx = 0;
         while idx < render_len {
             let message = &self.history[idx];
@@ -293,6 +296,7 @@ impl CodeTuiApp {
             }
             let mut block = Vec::new();
             let mut advance = 1;
+            let mut anchor_call = false;
             match message.role.as_str() {
                 "user" => {
                     // A skill invocation stores the full expanded SKILL.md as the
@@ -338,6 +342,7 @@ impl CodeTuiApp {
                         let plan = args.get("plan").and_then(|v| v.as_str()).unwrap_or("");
                         push_plan_card(&mut lines, &mut bars, None, plan, text_width, None);
                         previous_role = Some(message.role.as_str());
+                        merge_anchor = None;
                         idx += 1;
                         continue;
                     }
@@ -378,6 +383,7 @@ impl CodeTuiApp {
                         let (result, failed) = decode_tool_outcome(&message.content);
                         let line_starts = decode_line_starts(&message.content);
                         let old_content = decode_old_content(&message.content);
+                        let call_row = block.len();
                         render_tool_call(
                             &mut block,
                             &name,
@@ -389,14 +395,27 @@ impl CodeTuiApp {
                             old_content.as_deref(),
                         );
                         if let Some(&res_idx) = inline_result.get(&idx) {
-                            render_tool_result(
-                                &mut block,
-                                &self.history[res_idx].content,
+                            let content = &self.history[res_idx].content;
+                            let expanded = self.expanded_output.contains(&res_idx);
+                            let (spans, _) = tool_result_spans(
+                                content,
                                 cwd,
                                 Some(name.as_str()),
                                 None,
-                                self.expanded_output.contains(&res_idx),
+                                expanded,
+                                true,
                             );
+                            let mut suffix = vec![Span::raw(" ")];
+                            suffix.extend(spans);
+                            append_result_spans(&mut block[call_row], suffix);
+                            render_tool_result_body(
+                                &mut block,
+                                content,
+                                Some(name.as_str()),
+                                expanded,
+                            );
+                        } else {
+                            anchor_call = true;
                         }
                     }
                 }
@@ -405,21 +424,46 @@ impl CodeTuiApp {
                 "tool_result" => {
                     // `tool` fixes the unit (files/entries/matches); a detached
                     // call's target tags the result (see `tool_result_source`).
-                    let (tool, label) = match self.tool_result_source(idx, cwd) {
+                    let (tool, label, detached) = match self.tool_result_source(idx, cwd) {
                         Some((name, target, detached)) => (
                             Some(name),
                             detached.then_some(target).filter(|t| !t.is_empty()),
+                            detached,
                         ),
-                        None => (None, None),
+                        None => (None, None, true),
                     };
-                    render_tool_result(
-                        &mut block,
-                        &message.content,
-                        cwd,
-                        tool.as_deref(),
-                        label.as_deref(),
-                        self.expanded_output.contains(&idx),
-                    );
+                    let expanded = self.expanded_output.contains(&idx);
+                    match merge_anchor.take().filter(|_| !detached) {
+                        // Ride the call row directly above: `→ verb(args) ▸ +N lines`.
+                        Some(anchor) if !message.content.trim().is_empty() => {
+                            let (spans, _) = tool_result_spans(
+                                &message.content,
+                                cwd,
+                                tool.as_deref(),
+                                None,
+                                expanded,
+                                true,
+                            );
+                            let mut suffix = vec![Span::raw(" ")];
+                            suffix.extend(spans);
+                            append_result_spans(&mut lines[anchor], suffix);
+                            render_tool_result_body(
+                                &mut block,
+                                &message.content,
+                                tool.as_deref(),
+                                expanded,
+                            );
+                        }
+                        Some(_) => {}
+                        None => render_tool_result(
+                            &mut block,
+                            &message.content,
+                            cwd,
+                            tool.as_deref(),
+                            label.as_deref(),
+                            expanded,
+                        ),
+                    }
                 }
                 "local_command" => {
                     // Expanded renders the in-memory output (persisted preview after a
@@ -450,7 +494,9 @@ impl CodeTuiApp {
                 indent_sub_block(block)
             };
             let bar = role_bar_color(message.role.as_str());
+            let first_block_row = lines.len();
             push_block(&mut lines, &mut bars, block, Some(bar));
+            merge_anchor = anchor_call.then_some(first_block_row);
             // The `✻ Done in …` marker for a turn stamped on its last entry (which
             // may sit inside a coalesced block, so scan the block's index range).
             if let Some((i, &ms)) =

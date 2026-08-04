@@ -694,13 +694,22 @@ fn thinking_marker(has_more: bool, expanded: bool) -> &'static str {
     }
 }
 
-/// A clickable thinking header — the marker row; the block's later rows are
-/// indented so they don't match.
+/// A clickable thinking header. Must reject every other `✻`/`▸`/`▾`-leading row
+/// (`✻ Done in`, `✻ Tip`, output fold markers) — false positives shift the
+/// click ordinal and toggle the wrong block.
 pub(super) fn is_thinking_header(row: &str) -> bool {
     let row = row.trim_start();
-    row.starts_with(THINKING_MARKER)
-        || row.starts_with(THINKING_COLLAPSED_MARKER)
-        || row.starts_with(THINKING_EXPANDED_MARKER)
+    let Some(rest) = row
+        .strip_prefix(THINKING_MARKER)
+        .or_else(|| row.strip_prefix(THINKING_COLLAPSED_MARKER))
+        .or_else(|| row.strip_prefix(THINKING_EXPANDED_MARKER))
+    else {
+        return false;
+    };
+    rest.starts_with(' ')
+        && !is_output_expander(row)
+        && !rest.starts_with(" Done in ")
+        && !rest.starts_with(" Tip ")
 }
 
 /// Skips bare-punctuation reasoning (some models emit a lone "..." segment).
@@ -1243,26 +1252,27 @@ pub(super) fn render_tool_call(
         }
     }
     lines.push(line_with_plain(spans));
+    let call_row = lines.len() - 1;
     // For edit/write tools, show a compact diff of what changed so the user can
     // review the agent's edit without opening the file (no-op for tools without
     // a textual old/new, e.g. cursor edits).
     render_edit_diff(lines, name, args, line_starts, old_content);
-    // Cursor stores its result on the call entry (the in-process agent emits a
-    // separate `tool_result` line instead) — surface it as a compact `⎿` line,
-    // in the error hue when the tool failed.
-    if failed {
-        lines.push(line_with_plain(vec![
-            Span::styled("  ⎿ ".to_string(), Style::default().fg(ERROR())),
-            Span::styled(
-                result.unwrap_or("failed").to_string(),
-                Style::default().fg(ERROR()),
-            ),
-        ]));
-    } else if let Some(result) = result.filter(|r| !r.is_empty()) {
-        lines.push(line_with_plain(vec![
-            Span::styled("  ⎿ ".to_string(), Style::default().fg(FAINT())),
-            Span::styled(result.to_string(), Style::default().fg(FAINT())),
-        ]));
+    // Cursor stores its compact result on the call entry — ride the call row.
+    let outcome_color = if failed { ERROR() } else { FAINT() };
+    let outcome = if failed {
+        Some(result.unwrap_or("failed"))
+    } else {
+        result.filter(|r| !r.is_empty())
+    };
+    if let Some(outcome) = outcome {
+        let first = outcome.lines().next().unwrap_or_default().trim();
+        append_result_spans(
+            &mut lines[call_row],
+            vec![Span::styled(
+                format!(" · {}", truncate_chars(&strip_ansi_and_controls(first), 60)),
+                Style::default().fg(outcome_color),
+            )],
+        );
     }
 }
 
@@ -1344,6 +1354,7 @@ pub(super) fn render_tool_call_group(
         "grep" | "glob" => format!("searched ×{n}"),
         "run_bash" => format!("ran {n} commands"),
         "web_fetch" => format!("fetched {n} URLs"),
+        "web_search" => format!("searched the web ×{n}"),
         _ => format!("{} ×{n}", tool_display_name(name)),
     };
     let verb_style = if crate::agent::tools::is_mutating(name) {
@@ -1394,6 +1405,7 @@ pub(super) fn tool_call_target(name: &str, args: &serde_json::Value) -> String {
         "grep" | "glob" => pick("pattern").to_string(),
         "run_bash" => pick("command").to_string(),
         "web_fetch" => pick("url").to_string(),
+        "web_search" => pick("query").to_string(),
         _ => String::new(),
     }
 }
@@ -1474,6 +1486,7 @@ pub(super) fn tool_action_label(name: &str, args: &serde_json::Value, cwd: &str)
         "grep" | "glob" => "searching",
         "run_bash" => "running",
         "web_fetch" => "fetching",
+        "web_search" => "searching the web for",
         // MCP and any other external tool: name it, no target to show.
         _ => return format!("running {}", tool_display_name(name)),
     };
@@ -1609,16 +1622,41 @@ pub(super) const OUTPUT_COLLAPSED_PREFIX: &str = "▸ +";
 /// Leading marker of an expanded `!cmd` output (`▾ collapse`).
 pub(super) const OUTPUT_EXPANDED_PREFIX: &str = "▾ collapse";
 
-/// Whether a rendered transcript row is a clickable output expander: folded
-/// `▸ +N…`, expanded `⎿ ▾ N lines` summary, or trailing `▾ collapse`.
+/// NBSP glues the fold glyph to its count so the word-wrapper can't split the
+/// marker — a split marker corrupts the click ordinal → entry mapping.
+pub(super) const FOLD_NBSP: char = '\u{a0}';
+
+/// The fold toggle a tool result renders on its (merged) call row.
+pub(super) fn fold_marker(expanded: bool, count: usize, unit: &str) -> String {
+    if expanded {
+        format!("▾{FOLD_NBSP}{count} {unit}")
+    } else {
+        format!("▸{FOLD_NBSP}+{count} {unit}")
+    }
+}
+
+/// Whether `row` carries an NBSP-glued [`fold_marker`] (`▸ +N` / `▾ N`).
+fn contains_fold_marker(row: &str) -> bool {
+    let digit_after = |pat: &str| {
+        row.match_indices(pat).any(|(i, _)| {
+            row[i + pat.len()..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit())
+        })
+    };
+    digit_after("▸\u{a0}+") || digit_after("▾\u{a0}")
+}
+
+/// Whether a rendered transcript row is a clickable output expander: a merged
+/// call row's fold marker, a folded `!cmd`'s `▸ +N…`, or a `▾ collapse`.
 pub(super) fn is_output_expander(row: &str) -> bool {
+    if contains_fold_marker(row) {
+        return true;
+    }
     let row = row.trim_start();
     let row = row.strip_prefix("⎿ ").unwrap_or(row);
-    row.starts_with(OUTPUT_COLLAPSED_PREFIX)
-        || row.starts_with(OUTPUT_EXPANDED_PREFIX)
-        || row
-            .strip_prefix("▾ ")
-            .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+    row.starts_with(OUTPUT_COLLAPSED_PREFIX) || row.starts_with(OUTPUT_EXPANDED_PREFIX)
 }
 
 /// The true output line count a `local_command` entry carries (its persisted
@@ -1821,18 +1859,13 @@ pub(super) fn bash_exit_code(result: &str) -> Option<i32> {
     })
 }
 
-/// Render an agent tool result as a compact `⎿ summary` line under its call.
-/// A multi-line summary doubles as the fold toggle (`▸ +N lines`); a nonzero
-/// `run_bash` exit reads in the error hue so a broken build can't pass for green.
-pub(super) fn render_tool_result(
-    lines: &mut Vec<StyledLine>,
-    result: &str,
-    cwd: &str,
-    tool: Option<&str>,
-    label: Option<&str>,
-    expanded: bool,
-) {
-    let tool = tool.map(canonical_tool_name);
+struct ResultOutcome {
+    count: usize,
+    exit: Option<i32>,
+    failed: bool,
+}
+
+fn result_outcome(result: &str, tool: Option<&str>) -> ResultOutcome {
     let count = result.lines().count();
     let exit = (tool == Some("run_bash"))
         .then(|| bash_exit_code(result))
@@ -1843,21 +1876,44 @@ pub(super) fn render_tool_result(
     // adds it only on Err); a failed delegate must never read as green.
     let prefix_err = result.trim_start().starts_with("error:");
     let failed = exit.is_some() || (prefix_err && (count <= 1 || tool == Some("subagent")));
+    ResultOutcome {
+        count,
+        exit,
+        failed,
+    }
+}
+
+/// Append spans to a logical line, keeping its `plain` mirror (hitbox,
+/// selection copy) in sync.
+pub(super) fn append_result_spans(line: &mut StyledLine, spans: Vec<Span<'static>>) {
+    for span in spans {
+        line.plain.push_str(&span.content);
+        line.line.spans.push(span);
+    }
+}
+
+/// A result's compact outcome spans: fold toggle or single-line summary, plus
+/// exit/label/preview. `merged` is the suffix form riding the call row; a
+/// nonzero exit reads in the error hue so a broken build can't pass for green.
+pub(super) fn tool_result_spans(
+    result: &str,
+    cwd: &str,
+    tool: Option<&str>,
+    label: Option<&str>,
+    expanded: bool,
+    merged: bool,
+) -> (Vec<Span<'static>>, bool) {
+    let tool = tool.map(canonical_tool_name);
+    let ResultOutcome {
+        count,
+        exit,
+        failed,
+    } = result_outcome(result, tool);
     let summary_color = if failed { ERROR() } else { FAINT() };
-    let mut spans = vec![Span::styled(
-        "  ⎿ ".to_string(),
-        Style::default().fg(summary_color),
-    )];
+    let mut spans = Vec::new();
     if count > 1 {
-        // The summary line is the fold toggle in both states.
-        let unit = count_unit(tool, count);
-        let summary = if expanded {
-            format!("▾ {count} {unit}")
-        } else {
-            format!("{OUTPUT_COLLAPSED_PREFIX}{count} {unit}")
-        };
         spans.push(Span::styled(
-            summary,
+            fold_marker(expanded, count, count_unit(tool, count)),
             Style::default().fg(if failed { ERROR() } else { MUTED() }),
         ));
         if let Some(code) = exit {
@@ -1885,38 +1941,13 @@ pub(super) fn render_tool_result(
                 Style::default().fg(summary_color),
             ));
         }
-        lines.push(line_with_plain(spans));
-        if expanded {
-            for line in result.lines().take(MAX_EXPANDED_OUTPUT_LINES) {
-                let is_exit_line = line.trim().starts_with("[exit ");
-                lines.push(line_with_plain(vec![Span::styled(
-                    format!("    {}", strip_ansi_and_controls(line)),
-                    Style::default().fg(if is_exit_line { ERROR() } else { FAINT() }),
-                )]));
-            }
-            if count > MAX_EXPANDED_OUTPUT_LINES {
-                lines.push(line_with_plain(vec![Span::styled(
-                    format!("    … (+{} more lines)", count - MAX_EXPANDED_OUTPUT_LINES),
-                    Style::default().fg(FAINT()),
-                )]));
-            }
-            // A long block also folds from its far end.
-            if count > MAX_OUTPUT_LINES {
-                lines.push(line_with_plain(vec![Span::styled(
-                    format!("  {OUTPUT_EXPANDED_PREFIX}"),
-                    Style::default().fg(MUTED()),
-                )]));
-            }
-        } else if tool == Some("run_bash") {
-            for line in result.lines().skip(count.saturating_sub(STREAM_TAIL_LINES)) {
-                let is_exit_line = line.trim().starts_with("[exit ");
-                lines.push(line_with_plain(vec![Span::styled(
-                    tool_tail_row_text(&strip_ansi_and_controls(line), TOOL_TAIL_MAX_COLS),
-                    Style::default().fg(if is_exit_line { ERROR() } else { FAINT() }),
-                )]));
-            }
-        }
-        return;
+        return (spans, failed);
+    }
+    if merged {
+        spans.push(Span::styled(
+            "· ".to_string(),
+            Style::default().fg(summary_color),
+        ));
     }
     if let Some(label) = label.filter(|l| !l.is_empty()) {
         spans.push(Span::styled(
@@ -1928,7 +1959,73 @@ pub(super) fn render_tool_result(
         tool_result_summary(result, cwd),
         Style::default().fg(summary_color),
     ));
-    lines.push(line_with_plain(spans));
+    (spans, failed)
+}
+
+/// Rows under a result's summary: the expanded output, or — folded — a failed
+/// `run_bash`'s last lines. A folded success shows nothing.
+pub(super) fn render_tool_result_body(
+    lines: &mut Vec<StyledLine>,
+    result: &str,
+    tool: Option<&str>,
+    expanded: bool,
+) {
+    let tool = tool.map(canonical_tool_name);
+    let ResultOutcome { count, failed, .. } = result_outcome(result, tool);
+    if count <= 1 {
+        return;
+    }
+    if expanded {
+        for line in result.lines().take(MAX_EXPANDED_OUTPUT_LINES) {
+            let is_exit_line = line.trim().starts_with("[exit ");
+            lines.push(line_with_plain(vec![Span::styled(
+                format!("    {}", strip_ansi_and_controls(line)),
+                Style::default().fg(if is_exit_line { ERROR() } else { FAINT() }),
+            )]));
+        }
+        if count > MAX_EXPANDED_OUTPUT_LINES {
+            lines.push(line_with_plain(vec![Span::styled(
+                format!("    … (+{} more lines)", count - MAX_EXPANDED_OUTPUT_LINES),
+                Style::default().fg(FAINT()),
+            )]));
+        }
+        // A long block also folds from its far end.
+        if count > MAX_OUTPUT_LINES {
+            lines.push(line_with_plain(vec![Span::styled(
+                format!("  {OUTPUT_EXPANDED_PREFIX}"),
+                Style::default().fg(MUTED()),
+            )]));
+        }
+    } else if tool == Some("run_bash") && failed {
+        for line in result.lines().skip(count.saturating_sub(STREAM_TAIL_LINES)) {
+            let is_exit_line = line.trim().starts_with("[exit ");
+            lines.push(line_with_plain(vec![Span::styled(
+                tool_tail_row_text(&strip_ansi_and_controls(line), TOOL_TAIL_MAX_COLS),
+                Style::default().fg(if is_exit_line { ERROR() } else { FAINT() }),
+            )]));
+        }
+    }
+}
+
+/// Standalone `⎿ summary` + body, for results whose call row isn't directly
+/// above; adjacent results merge onto their call row instead.
+pub(super) fn render_tool_result(
+    lines: &mut Vec<StyledLine>,
+    result: &str,
+    cwd: &str,
+    tool: Option<&str>,
+    label: Option<&str>,
+    expanded: bool,
+) {
+    let (spans, failed) = tool_result_spans(result, cwd, tool, label, expanded, false);
+    let summary_color = if failed { ERROR() } else { FAINT() };
+    let mut row = vec![Span::styled(
+        "  ⎿ ".to_string(),
+        Style::default().fg(summary_color),
+    )];
+    row.extend(spans);
+    lines.push(line_with_plain(row));
+    render_tool_result_body(lines, result, tool, expanded);
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2963,7 +3060,8 @@ fn tool_arg_summary(name: &str, args: &serde_json::Value, cwd: &str) -> String {
         }
         "glob" | "grep" => truncate_chars(pick("pattern"), 60),
         "run_bash" => truncate_chars(&condense_command(pick("command"), cwd), 60),
-        "web_fetch" => truncate_chars(pick("url"), 60),
+        "web_fetch" => display_url(pick("url"), 60),
+        "web_search" => truncate_chars(pick("query"), 60),
         "skill" => truncate_chars(pick("name"), 60),
         // The question is the salient detail; the answer lands on the `⎿` result line.
         "ask_user" => truncate_chars(pick("question"), 72),
@@ -2998,6 +3096,28 @@ fn tool_arg_summary(name: &str, args: &serde_json::Value, cwd: &str) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// Scheme stripped, over-wide URLs middle-truncated to `host/…/tail` — the
+/// tail is what distinguishes sibling fetches.
+fn display_url(url: &str, max: usize) -> String {
+    let bare = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    if cell_width(bare) <= max {
+        return bare.to_string();
+    }
+    let Some((host, path)) = bare.split_once('/') else {
+        return truncate_chars(bare, max);
+    };
+    // An oversized host leaves no room for a tail — plain truncation then.
+    let tail_budget = max.saturating_sub(cell_width(host) + 1);
+    if tail_budget < 8 {
+        return truncate_chars(bare, max);
+    }
+    format!("{host}/{}", truncate_path_left(path, tail_budget))
 }
 
 /// A file path for the transcript: made relative to the agent's `cwd` (the footer
@@ -3945,6 +4065,33 @@ mod render_tests {
             tool_action_label("Bash", &serde_json::json!({"command": "ls"}), ""),
             "running ls"
         );
+    }
+
+    #[test]
+    fn tool_arg_summary_web_tools_show_query_and_tail_truncated_url() {
+        assert_eq!(
+            tool_arg_summary(
+                "web_search",
+                &serde_json::json!({"query": "antigravity sdk headless"}),
+                ""
+            ),
+            "antigravity sdk headless"
+        );
+        assert_eq!(
+            tool_arg_summary(
+                "web_fetch",
+                &serde_json::json!({"url": "https://github.com/a/b"}),
+                ""
+            ),
+            "github.com/a/b"
+        );
+        // Over-wide URLs keep the host and the distinguishing tail.
+        let long = "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/docs/issues/123";
+        let shown = tool_arg_summary("web_fetch", &serde_json::json!({ "url": long }), "");
+        assert!(shown.starts_with("raw.githubusercontent.com/"), "{shown}");
+        assert!(shown.contains("…"), "{shown}");
+        assert!(shown.ends_with("issues/123"), "{shown}");
+        assert!(super::cell_width(&shown) <= 60, "{shown}");
     }
 
     #[test]

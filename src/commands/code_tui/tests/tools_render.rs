@@ -393,7 +393,7 @@ fn test_folded_run_bash_result_keeps_streaming_tail_height() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = make_test_app(tx, rx);
 
-    // Short output stays whole under the summary — nothing vanishes.
+    // A successful run folds fully — no stale tail rows in the transcript.
     app.apply_agent_tool_call(
         None,
         "run_bash".to_string(),
@@ -403,10 +403,13 @@ fn test_folded_run_bash_result_keeps_streaming_tail_height() {
     );
     app.apply_agent_tool_result("line one\nline two\nline three".to_string());
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("line one"), "{plain}");
-    assert!(plain.contains("line three"), "{plain}");
+    assert!(plain.contains("+3 lines"), "{plain}");
+    assert!(
+        !plain.contains("line one") && !plain.contains("line three"),
+        "a folded success shows no tail: {plain}"
+    );
 
-    // Long output keeps only the last `STREAM_TAIL_LINES` — no collapse, no flood.
+    // A failed run keeps the last `STREAM_TAIL_LINES` — the diagnosis.
     app.apply_agent_tool_call(
         None,
         "run_bash".to_string(),
@@ -414,13 +417,15 @@ fn test_folded_run_bash_result_keeps_streaming_tail_height() {
         vec![],
         None,
     );
-    let long = (1..=40)
+    let long = (1..=39)
         .map(|n| format!("row {n}"))
+        .chain(std::iter::once("[exit 7]".to_string()))
         .collect::<Vec<_>>()
         .join("\n");
     app.apply_agent_tool_result(long);
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("row 40"), "last line kept: {plain}");
+    assert!(plain.contains("exited 7"), "{plain}");
+    assert!(plain.contains("row 39"), "last lines kept: {plain}");
     assert!(plain.contains("row 37"), "tail window kept: {plain}");
     assert!(
         !plain.contains("row 36"),
@@ -441,7 +446,7 @@ fn test_folded_run_bash_result_keeps_streaming_tail_height() {
         None,
     );
     let blob = format!("head-marker {}", "x".repeat(30_000));
-    app.apply_agent_tool_result(format!("banner line\n{blob}\n[exit 0]"));
+    app.apply_agent_tool_result(format!("banner line\n{blob}\n[exit 3]"));
     let plain_lines = app.build_transcript().plain_lines;
     let row = plain_lines
         .iter()
@@ -503,29 +508,21 @@ fn test_parallel_mcp_batch_interleaves_call_and_result() {
     };
     let rows = refresh(&mut app);
 
-    let shape: Vec<&str> = rows
-        .iter()
-        .filter_map(|r| {
-            if r.contains("localhost/") {
-                Some("call")
-            } else if is_output_expander(r) {
-                Some("fold")
-            } else {
-                None
-            }
-        })
-        .collect();
+    let call_rows: Vec<&String> = rows.iter().filter(|r| r.contains("localhost/")).collect();
+    assert_eq!(call_rows.len(), 3, "rows:\n{}", rows.join("\n"));
+    for call_row in &call_rows {
+        assert!(
+            is_output_expander(call_row),
+            "merged call row is the toggle: {call_row:?}"
+        );
+    }
+    let fold_count = rows.iter().filter(|r| is_output_expander(r)).count();
     assert_eq!(
-        shape,
-        vec!["call", "fold", "call", "fold", "call", "fold"],
-        "each fold draws under its call:\n{}",
+        fold_count,
+        3,
+        "no stray `⎿` fold rows besides the merged ones:\n{}",
         rows.join("\n")
     );
-    let devices_row = rows
-        .iter()
-        .position(|r| r.contains("query_qoe_devices"))
-        .unwrap();
-    assert!(is_output_expander(&rows[devices_row + 1]));
     assert!(markers.iter().all(|m| rows.iter().all(|r| !r.contains(m))));
 
     let fold_rows: Vec<usize> = rows
@@ -734,18 +731,18 @@ fn test_detached_results_in_batch_interleave_under_their_call() {
         .position(|l| l.contains("400|sanitize"))
         .unwrap();
     assert!(
-        lines[read_call + 1].contains("+3 lines"),
-        "read fold under read call:\n{}",
+        lines[read_call].contains("+3 lines"),
+        "read fold rides the read call row:\n{}",
         lines.join("\n")
     );
     assert!(
-        read_call + 1 < grep_call,
+        read_call < grep_call,
         "read pair precedes grep pair:\n{}",
         lines.join("\n")
     );
     assert!(
-        lines[grep_call + 1].contains("+2 matches"),
-        "grep fold under grep call:\n{}",
+        lines[grep_call].contains("+2 matches"),
+        "grep fold rides the grep call row:\n{}",
         lines.join("\n")
     );
     assert!(
@@ -791,15 +788,15 @@ fn test_mixed_batch_with_adjacent_pair_keeps_results_under_their_calls() {
     let plain = lines.join("\n");
     // The stray adjacent pair never collapses in a mixed batch.
     assert!(!plain.contains("list_dir ×"), "must not coalesce:\n{plain}");
-    // Every result hugs the call that produced it, in the right unit.
+    // Every result rides the call row that produced it, in the right unit.
     let under = |call: &str, result: &str| {
         let i = lines
             .iter()
             .position(|l| l.contains(call))
             .unwrap_or_else(|| panic!("no call {call:?} in:\n{plain}"));
         assert!(
-            lines[i + 1].contains(result),
-            "expected {result:?} under {call:?}:\n{plain}"
+            lines[i].contains(result),
+            "expected {result:?} on {call:?}'s row:\n{plain}"
         );
     };
     under("→ glob(**/*)", "3 files");
@@ -908,7 +905,10 @@ fn test_tool_result_expands_inline_via_keyboard_toggle() {
     );
 
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("▸ +8 lines"), "{plain}");
+    assert!(
+        plain.contains("run_bash(cargo test) ▸\u{a0}+8 lines"),
+        "{plain}"
+    );
     assert!(plain.contains("exited 1"), "{plain}");
     // The streamed tail stays put, but earlier lines fold away.
     assert!(plain.contains("[exit 1]"), "tail line kept: {plain}");
@@ -924,7 +924,7 @@ fn test_tool_result_expands_inline_via_keyboard_toggle() {
         "expanded result must show all its lines: {plain}"
     );
     // The summary stays the (sole) toggle for a short block — no trailing collapse.
-    assert!(plain.contains("▾ 8 lines"), "{plain}");
+    assert!(plain.contains("▾\u{a0}8 lines"), "{plain}");
     assert!(!plain.contains(OUTPUT_EXPANDED_PREFIX), "{plain}");
 
     assert!(app.toggle_latest_output());
@@ -975,7 +975,7 @@ fn expanded_tool_result_refolds_from_its_summary_row() {
         .collect();
     assert_eq!(markers.len(), 2, "rows:\n{}", rows.join("\n"));
     assert!(
-        rows[markers[0]].contains("▾ 100 lines"),
+        rows[markers[0]].contains("▾\u{a0}100 lines"),
         "{}",
         rows[markers[0]]
     );
@@ -1101,8 +1101,10 @@ fn test_cursor_tool_update_enriches_call_in_place() {
     assert!(app.transcript_revision > rev_before);
 
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("read_file(src/chat.rs)"), "{plain}");
-    assert!(plain.contains("⎿ 42 lines"), "{plain}");
+    assert!(
+        plain.contains("read_file(src/chat.rs) · 42 lines"),
+        "{plain}"
+    );
     assert!(
         !plain.contains("Read File"),
         "stale title remained: {plain}"
@@ -1116,7 +1118,10 @@ fn test_cursor_tool_update_enriches_call_in_place() {
         true,
     );
     let plain = app.build_transcript().plain_lines.join("\n");
-    assert!(plain.contains("⎿ permission denied"), "{plain}");
+    assert!(
+        plain.contains("read_file(src/chat.rs) · permission denied"),
+        "{plain}"
+    );
 }
 
 #[tokio::test]
@@ -1193,36 +1198,25 @@ fn test_build_transcript_renders_tool_steps() {
 
     let transcript = app.build_transcript();
     let plain = transcript.plain_lines.join("\n");
-    // Tree-style call line with the salient arg, and a clean line-count result —
-    // NOT the noisy first numbered line.
     assert!(
-        plain.contains("→ read_file(src/parser.rs)"),
-        "missing tool-call line in:\n{plain}"
+        plain.contains("→ read_file(src/parser.rs) ▸\u{a0}+3 lines"),
+        "missing merged call+result row in:\n{plain}"
     );
     assert!(
-        plain.contains("⎿ ▸ +3 lines"),
-        "missing tool-result line in:\n{plain}"
+        !plain.contains("⎿"),
+        "adjacent result must merge, not spend a `⎿` line:\n{plain}"
     );
     assert!(
         !plain.contains("/**"),
         "tool-result summary should not leak the noisy first line:\n{plain}"
     );
 
-    // The call and its result hug (no blank line between them) and both carry
-    // the cyan TOOL accent bar.
     let call_idx = transcript
         .plain_lines
         .iter()
         .position(|l| l.contains("→ read_file"))
         .unwrap();
-    let result_idx = transcript
-        .plain_lines
-        .iter()
-        .position(|l| l.contains("⎿ ▸ +3 lines"))
-        .unwrap();
-    assert_eq!(result_idx, call_idx + 1, "result should hug its call");
     assert_eq!(transcript.bar_colors[call_idx], Some(TOOL()));
-    assert_eq!(transcript.bar_colors[result_idx], Some(TOOL()));
 }
 
 #[test]
@@ -1367,4 +1361,184 @@ fn test_build_transcript_coalesces_consecutive_tool_calls() {
         !plain.contains("read_file(src/sidebar.rs)"),
         "individual read cards should be coalesced away:\n{plain}"
     );
+}
+#[test]
+fn thought_header_click_skips_done_and_tip_rows() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.thinking_enabled = true;
+    // Three turns: windowed thought + reply + `✻ Done in` row each.
+    for i in 0..3usize {
+        app.history.push(ChatMessage {
+            model: None,
+            role: "user".to_string(),
+            content: format!("ask {i}"),
+            reasoning_content: None,
+            attachments: vec![],
+        });
+        let reasoning: String = (1..=8)
+            .map(|n| format!("turn{i} thought line {n}\n"))
+            .collect();
+        app.history.push(ChatMessage {
+            model: None,
+            role: "assistant".to_string(),
+            content: format!("reply {i}"),
+            reasoning_content: Some(reasoning),
+            attachments: vec![],
+        });
+        let idx = app.history.len() - 1;
+        app.turn_durations.insert(idx, 1000 + i as u64);
+    }
+    let reasoning_turns: Vec<usize> = app
+        .history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "assistant" && m.reasoning_content.is_some())
+        .map(|(i, _)| i)
+        .collect();
+
+    let body = app.build_transcript_history_body(100);
+    let wrapped = wrap_transcript(&body.lines, &body.bar_colors, 100);
+    app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+        Rect::new(0, 0, 100, 80),
+        0,
+        wrapped.rows.to_vec(),
+    ));
+    let second_header = wrapped
+        .rows
+        .iter()
+        .position(|r| r.trim_start().starts_with('▸') && r.contains("turn1"))
+        .expect("second thought header");
+    assert!(app.toggle_thinking_at_row(second_header));
+    assert!(
+        app.expanded_thinking.contains(&reasoning_turns[1]),
+        "clicked turn1's header but expanded {:?}, wanted {} (turn indices {reasoning_turns:?})\nrows:\n{}",
+        app.expanded_thinking,
+        reasoning_turns[1],
+        wrapped.rows.join("\n")
+    );
+}
+
+#[test]
+fn merged_marker_clicks_map_to_their_own_blocks() {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = make_test_app(tx, rx);
+    app.thinking_enabled = true;
+    app.history.push(ChatMessage {
+        model: None,
+        role: "user".to_string(),
+        content: "do things".to_string(),
+        reasoning_content: None,
+        attachments: vec![],
+    });
+    app.history.push(ChatMessage {
+        model: None,
+        role: "assistant".to_string(),
+        content: "Working on it with a plan that spans a while.".to_string(),
+        reasoning_content: Some(
+            "thinking about the task at length and considering many options".to_string(),
+        ),
+        attachments: vec![],
+    });
+    let long_cmd = "printf '%s\\n' '--- local agy ---'; if command -v agy >/dev/null; then echo yes; fi && ls -la /tmp";
+    for (cmd, n) in [
+        (long_cmd, 5usize),
+        ("cargo build --release --quiet", 7),
+        ("git status --porcelain=v2 --branch --show-stash", 9),
+    ] {
+        app.apply_agent_tool_call(
+            None,
+            "run_bash".to_string(),
+            serde_json::json!({"command": cmd}),
+            vec![],
+            None,
+        );
+        let out: String = (1..=n)
+            .map(|i| format!("out{i}\n"))
+            .collect::<String>()
+            .trim_end()
+            .to_string();
+        app.apply_agent_tool_result(out);
+    }
+    app.history.push(ChatMessage {
+        model: None,
+        role: "assistant".to_string(),
+        content: "Now fetching docs.".to_string(),
+        reasoning_content: Some(
+            "we should double check the docs before proceeding further".to_string(),
+        ),
+        attachments: vec![],
+    });
+    app.apply_agent_tool_call(
+        None,
+        "web_fetch".to_string(),
+        serde_json::json!({"url": "https://raw.githubusercontent.com/google-antigravity/antigravity-cli/refs/heads/main/README.md"}),
+        vec![],
+        None,
+    );
+    app.apply_agent_tool_result(
+        (1..=11)
+            .map(|i| format!("doc{i}\n"))
+            .collect::<String>()
+            .trim_end()
+            .to_string(),
+    );
+
+    let bash_results: Vec<usize> = app
+        .history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "tool_result")
+        .map(|(i, _)| i)
+        .collect();
+    app.turn_durations.insert(bash_results[2], 1200);
+    app.turn_durations.insert(app.history.len() - 1, 800);
+
+    let result_indices: Vec<usize> = app
+        .history
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role == "tool_result")
+        .map(|(i, _)| i)
+        .collect();
+
+    for width in [60u16, 80, 120, 200] {
+        for (k, &expect_idx) in result_indices.iter().enumerate() {
+            app.expanded_output.clear();
+            let body = app.build_transcript_history_body(width);
+            let wrapped = wrap_transcript(&body.lines, &body.bar_colors, width);
+            app.transcript_hitbox = Some(TranscriptHitbox::from_rows(
+                Rect::new(0, 0, width, 60),
+                0,
+                wrapped.rows.to_vec(),
+            ));
+            let marker_rows: Vec<usize> = wrapped
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| is_output_expander(r))
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(
+                marker_rows.len(),
+                result_indices.len(),
+                "width {width}: marker rows vs results:\n{}",
+                wrapped.rows.join("\n")
+            );
+            let row = marker_rows[k];
+            let stole = app.toggle_thinking_at_row(row);
+            assert!(
+                !stole,
+                "width {width}: thinking stole the click on row {row}: {:?}",
+                wrapped.rows[row]
+            );
+            assert!(app.toggle_output_at_row(row), "width {width} row {row}");
+            assert!(
+                app.expanded_output.contains(&expect_idx),
+                "width {width}: clicked marker {k} (row {row}) but expanded {:?}, wanted {expect_idx}\nrows:\n{}",
+                app.expanded_output,
+                wrapped.rows.join("\n")
+            );
+        }
+    }
 }
