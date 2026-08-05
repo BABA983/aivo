@@ -6,7 +6,9 @@
 //!
 //! Transports: stdio (a spawned child, newline-delimited JSON-RPC 2.0) and
 //! Streamable HTTP (a `url` server — POST JSON-RPC, reply as `application/json` or
-//! an SSE stream, with an `Mcp-Session-Id` echoed after `initialize`). Scope:
+//! an SSE stream), which speaks two eras negotiated per connection by a
+//! stateless-first probe: 2026-07-28 stateless (self-contained requests, no
+//! sessions) with fallback to the legacy stateful handshake. Scope:
 //! tools only (no resources/prompts/sampling), sequential calls per server (a
 //! mutex around each server's transport). Servers are configured in
 //! `~/.config/aivo/mcp.json` and `<cwd>/.mcp.json` (the `mcpServers` object, same
@@ -23,6 +25,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -57,11 +60,12 @@ const MCP_MAX_HTTP_BODY_BYTES: usize = 16 * 1024 * 1024;
 /// Cap on the bytes read from an error-response body before snippeting it — we
 /// only show the first ~300 chars, so there's no need to buffer a huge body.
 const MCP_HTTP_ERROR_SNIPPET_BYTES: usize = 64 * 1024;
-/// MCP protocol version advertised for the Streamable HTTP transport (in the
-/// `initialize` params and the `MCP-Protocol-Version` header on later requests).
-/// The Streamable HTTP transport was introduced in this revision; stdio keeps the
-/// older `2024-11-05` it has always sent.
+/// Legacy (stateful) Streamable HTTP pin — the fallback when a server doesn't
+/// speak the stateless revision. Stdio keeps the older `2024-11-05`.
 const MCP_HTTP_PROTOCOL_VERSION: &str = "2025-03-26";
+/// Stateless revision (no handshake, no sessions); tried first for every HTTP
+/// server.
+const MCP_STATELESS_PROTOCOL_VERSION: &str = "2026-07-28";
 
 /// How aivo reaches an MCP server: a spawned child over stdio, or a remote
 /// endpoint over Streamable HTTP. Both speak JSON-RPC 2.0; only the way a
@@ -111,6 +115,9 @@ struct McpTool {
     name: String,
     description: String,
     input_schema: Value,
+    /// `x-mcp-header` annotations mirrored into `Mcp-Param-*` headers on each
+    /// call (stateless servers only).
+    header_params: Vec<HeaderParam>,
 }
 
 /// A connected server's transport state, behind the per-server mutex. Both
@@ -134,19 +141,32 @@ struct StdioIo {
     _child: Child,
 }
 
+/// Which Streamable HTTP era the connection negotiated — decided once, by the
+/// connect-time probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpMode {
+    Legacy,
+    Stateless,
+}
+
 /// Streamable HTTP transport: one endpoint that answers each POSTed JSON-RPC
 /// request with either a single `application/json` body or an SSE stream. The
-/// `Mcp-Session-Id` returned by `initialize` is echoed on every later request.
+/// `Mcp-Session-Id` returned by `initialize` is echoed on later requests
+/// (legacy mode only).
 struct HttpIo {
     client: reqwest::Client,
     endpoint: String,
     headers: Vec<(String, String)>,
     session_id: Option<String>,
     next_id: u64,
+    mode: HttpMode,
 }
 
 struct McpServer {
     tools: Vec<McpTool>,
+    /// Tools the stateless parse excluded (invalid `x-mcp-header`); on the
+    /// snapshot so reconnect-reuse keeps reporting them.
+    tool_warnings: Vec<String>,
     io: Mutex<ServerIo>,
     /// Mirrors `ServerConfig::trust`; `false` → gate this server's tool calls.
     trust: bool,
@@ -190,6 +210,9 @@ pub struct McpClient {
     /// for a spawn/handshake failure or a config-file label for a JSON error.
     /// Surfaced to the user so a mis-configured server isn't a silent no-op.
     errors: Vec<(String, String)>,
+    /// Advisories from healthy, connected servers as `(server, reason)` —
+    /// never rendered as failures.
+    warnings: Vec<(String, String)>,
     /// HTTP servers whose connect failed specifically with a `401` — they need
     /// OAuth. A typed signal (rather than matching the error text) so the UI can
     /// render "needs authorization" and the auto-authorize path fires reliably.
@@ -778,9 +801,18 @@ impl McpClient {
         connect_errors.sort_by(|a, b| a.0.cmp(&b.0));
         errors.extend(connect_errors);
 
+        // Kept apart from `errors`: the server is healthy and connected, and
+        // must not render as failed.
+        let mut warnings: Vec<(String, String)> = servers
+            .iter()
+            .flat_map(|(name, s)| s.tool_warnings.iter().map(|w| (name.clone(), w.clone())))
+            .collect();
+        warnings.sort();
+
         McpClient {
             servers,
             errors,
+            warnings,
             needs_auth,
         }
     }
@@ -792,6 +824,11 @@ impl McpClient {
     /// Connect/parse failures as `(source, reason)`, for surfacing to the user.
     pub fn errors(&self) -> &[(String, String)] {
         &self.errors
+    }
+
+    /// Advisories from healthy, connected servers — unlike `errors`.
+    pub fn warnings(&self) -> &[(String, String)] {
+        &self.warnings
     }
 
     /// Whether `name`'s connect failed with a `401` (it needs OAuth). Drives the
@@ -818,6 +855,7 @@ impl McpClient {
         McpClient {
             servers: HashMap::new(),
             errors,
+            warnings: Vec::new(),
             needs_auth,
         }
     }
@@ -891,12 +929,12 @@ impl McpClient {
     /// Resolve a fully-qualified `mcp__server__tool` name to its (server, original
     /// tool name) by forward-matching against known tools. Robust even when a
     /// server name itself contains `__` — reverse-parsing the name is not.
-    fn lookup(&self, qualified: &str) -> Option<(&McpServer, &str)> {
+    fn lookup(&self, qualified: &str) -> Option<(&McpServer, &McpTool)> {
         self.servers.iter().find_map(|(srv, s)| {
             s.tools
                 .iter()
                 .find(|t| qualified_name(srv, &t.name) == qualified)
-                .map(|t| (s.as_ref(), t.name.as_str()))
+                .map(|t| (s.as_ref(), t))
         })
     }
 }
@@ -948,17 +986,33 @@ impl ExternalTools for McpClient {
                     "MCP tool `{name}` is unavailable: its server became unresponsive earlier and was disabled for this session"
                 ));
             }
-            let tool = tool.to_string();
+            let tool_name = tool.name.clone();
+            let extras = header_params_to_headers(&tool.header_params, args);
             let mut io = server.io.lock().await;
-            match io
-                .request(
-                    "tools/call",
-                    json!({"name": tool, "arguments": args}),
-                    MCP_CALL_TIMEOUT,
-                )
-                .await
+            let mut result = call_tool_once(&mut io, &tool_name, args, &extras).await;
+            // `-32020` HeaderMismatch: the tool's schema changed since
+            // `tools/list` — refetch, rebuild headers, retry once on the guard
+            // we already hold. Advertised specs stay stale until reconnect.
+            if matches!(
+                &result,
+                Err(RequestError::Protocol {
+                    code: Some(-32020),
+                    ..
+                })
+            ) && let Some(fresh) = refetch_header_params(&mut io, &tool_name).await
             {
+                let extras = header_params_to_headers(&fresh, args);
+                result = call_tool_once(&mut io, &tool_name, args, &extras).await;
+            }
+            match result {
                 Ok(result) => {
+                    // MRTR: the server wants more input mid-call — unsupported,
+                    // so surface it clearly instead of half-parsing.
+                    if result.get("resultType").and_then(|t| t.as_str()) == Some("input_required") {
+                        return Err(format!(
+                            "MCP tool `{name}` asked for additional input rounds (resultType \"input_required\"), which aivo doesn't support yet"
+                        ));
+                    }
                     let text = extract_text(&result);
                     if result
                         .get("isError")
@@ -976,7 +1030,7 @@ impl ExternalTools for McpClient {
                 }
                 // The server answered, just with an error — it's healthy, so leave
                 // it enabled and surface the error to the model.
-                Err(RequestError::Protocol(msg)) => Err(msg),
+                Err(RequestError::Protocol { message, .. }) => Err(message),
                 // A 401 mid-session means the token expired or was revoked.
                 // Re-authorization fixes it, so don't disable the server — tell
                 // the user where to re-auth.
@@ -994,6 +1048,36 @@ impl ExternalTools for McpClient {
             }
         })
     }
+}
+
+/// One `tools/call` round-trip on an already-locked transport.
+async fn call_tool_once(
+    io: &mut ServerIo,
+    tool: &str,
+    args: &Value,
+    extras: &[(String, String)],
+) -> Result<Value, RequestError> {
+    io.request_with_headers(
+        "tools/call",
+        json!({"name": tool, "arguments": args}),
+        extras,
+        MCP_CALL_TIMEOUT,
+    )
+    .await
+}
+
+/// After `-32020`: re-derive the tool's header params from a fresh
+/// `tools/list`. `None` ⇒ the caller surfaces the original error.
+async fn refetch_header_params(io: &mut ServerIo, tool: &str) -> Option<Vec<HeaderParam>> {
+    let list = io
+        .request("tools/list", json!({}), MCP_CALL_TIMEOUT)
+        .await
+        .ok()?;
+    let (tools, _) = parse_tools_stateless(&list);
+    tools
+        .into_iter()
+        .find(|t| t.name == tool)
+        .map(|t| t.header_params)
 }
 
 /// An `ExternalTools` view of a client minus the tools the user turned off in
@@ -1251,10 +1335,20 @@ async fn connect_server(
             {
                 headers.push(("Authorization".to_string(), bearer));
             }
-            (
-                ServerIo::Http(HttpIo::new(url, &headers)?),
-                MCP_HTTP_PROTOCOL_VERSION,
-            )
+            let mut http = HttpIo::new(url, &headers)?;
+            // Stateless-first: one self-contained `tools/list` IS the whole
+            // connect; otherwise fall through to the legacy handshake.
+            if let Some(list) = http_stateless_probe(&mut http, handshake_timeout).await? {
+                let (tools, tool_warnings) = parse_tools_stateless(&list);
+                return Ok(McpServer {
+                    tools,
+                    tool_warnings,
+                    io: Mutex::new(ServerIo::Http(http)),
+                    trust: cfg.trust,
+                    dead: AtomicBool::new(false),
+                });
+            }
+            (ServerIo::Http(http), MCP_HTTP_PROTOCOL_VERSION)
         }
     };
 
@@ -1276,6 +1370,7 @@ async fn connect_server(
 
     Ok(McpServer {
         tools,
+        tool_warnings: Vec::new(),
         io: Mutex::new(io),
         trust: cfg.trust,
         dead: AtomicBool::new(false),
@@ -1352,7 +1447,12 @@ fn spawn_stdio(
 #[derive(Debug)]
 enum RequestError {
     Transport(String),
-    Protocol(String),
+    Protocol {
+        /// JSON-RPC error code when present (e.g. `-32020` drives the
+        /// header-refetch retry).
+        code: Option<i64>,
+        message: String,
+    },
     /// An HTTP `401` from a Streamable HTTP server — it needs OAuth. Carries the
     /// `WWW-Authenticate` header (when present) for diagnostics; the user
     /// re-authorizes the server from `/mcp` rather than this being a hard failure.
@@ -1362,7 +1462,7 @@ enum RequestError {
 impl RequestError {
     fn into_message(self) -> String {
         match self {
-            RequestError::Transport(m) | RequestError::Protocol(m) => m,
+            RequestError::Transport(m) | RequestError::Protocol { message: m, .. } => m,
             RequestError::Unauthorized(Some(h)) => {
                 format!("authorization required (HTTP 401): {h}")
             }
@@ -1379,9 +1479,22 @@ impl ServerIo {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, RequestError> {
+        self.request_with_headers(method, params, &[], timeout)
+            .await
+    }
+
+    /// `request` plus per-request HTTP headers (`Mcp-Param-*`); stdio ignores
+    /// them.
+    async fn request_with_headers(
+        &mut self,
+        method: &str,
+        params: Value,
+        extra_headers: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<Value, RequestError> {
         match self {
             ServerIo::Stdio(io) => stdio_request(io, method, params, timeout).await,
-            ServerIo::Http(io) => http_request(io, method, params, timeout).await,
+            ServerIo::Http(io) => http_request(io, method, params, extra_headers, timeout).await,
         }
     }
 
@@ -1398,12 +1511,14 @@ impl ServerIo {
 /// to `Protocol`. Shared by both transports once a response object is in hand.
 fn json_rpc_result(v: &Value) -> Result<Value, RequestError> {
     if let Some(err) = v.get("error") {
-        return Err(RequestError::Protocol(
-            err.get("message")
+        return Err(RequestError::Protocol {
+            code: err.get("code").and_then(|c| c.as_i64()),
+            message: err
+                .get("message")
                 .and_then(|m| m.as_str())
                 .unwrap_or("MCP error")
                 .to_string(),
-        ));
+        });
     }
     Ok(v.get("result").cloned().unwrap_or(Value::Null))
 }
@@ -1469,16 +1584,22 @@ impl HttpIo {
             headers: headers.to_vec(),
             session_id: None,
             next_id: 1,
+            mode: HttpMode::Legacy,
         })
     }
 
-    /// POST a JSON-RPC message, attaching the negotiated session id and any
-    /// configured headers. Accepts both a single JSON reply and an SSE stream.
+    /// POST a JSON-RPC message with the mode's protocol-version header, the
+    /// session id (legacy only), per-request extras, and configured headers.
     async fn post(
         &self,
         body: &Value,
+        extra_headers: &[(String, String)],
         timeout: Duration,
     ) -> Result<reqwest::Response, RequestError> {
+        let version = match self.mode {
+            HttpMode::Legacy => MCP_HTTP_PROTOCOL_VERSION,
+            HttpMode::Stateless => MCP_STATELESS_PROTOCOL_VERSION,
+        };
         let mut req = self
             .client
             .post(&self.endpoint)
@@ -1487,10 +1608,15 @@ impl HttpIo {
                 "application/json, text/event-stream",
             )
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header("MCP-Protocol-Version", MCP_HTTP_PROTOCOL_VERSION)
+            .header("MCP-Protocol-Version", version)
             .json(body);
-        if let Some(sid) = &self.session_id {
+        if self.mode == HttpMode::Legacy
+            && let Some(sid) = &self.session_id
+        {
             req = req.header("Mcp-Session-Id", sid.as_str());
+        }
+        for (k, v) in extra_headers {
+            req = req.header(k.as_str(), v.as_str());
         }
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
@@ -1502,16 +1628,20 @@ impl HttpIo {
     }
 }
 
-/// Send a JSON-RPC request over Streamable HTTP, transparently recovering from an
-/// expired session: a `404` on a request bearing an `Mcp-Session-Id` means the
-/// server dropped the session (RFC: the client re-initializes), so we drop the
-/// id, re-`initialize` a fresh session, and retry the request once.
+/// Send a JSON-RPC request over Streamable HTTP. Stateless requests are
+/// self-contained; legacy mode transparently recovers from an expired session
+/// (a `404` on a request bearing an `Mcp-Session-Id`) by re-initializing and
+/// retrying once.
 async fn http_request(
     io: &mut HttpIo,
     method: &str,
     params: Value,
+    extra_headers: &[(String, String)],
     timeout: Duration,
 ) -> Result<Value, RequestError> {
+    if io.mode == HttpMode::Stateless {
+        return http_request_stateless(io, method, params, extra_headers, timeout).await;
+    }
     if let Some(v) = http_request_once(io, method, &params, timeout).await? {
         return Ok(v);
     }
@@ -1541,7 +1671,7 @@ async fn http_request_once(
     let id = io.next_id;
     io.next_id += 1;
     let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-    let resp = io.post(&body, timeout).await?;
+    let resp = io.post(&body, &[], timeout).await?;
 
     // Capture the session id the server assigns at initialize, for later requests.
     if method == "initialize"
@@ -1554,22 +1684,11 @@ async fn http_request_once(
     }
 
     let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
 
     // A 401 means the server wants OAuth — surface it distinctly (the user
     // authorizes it from `/mcp`) rather than as a hard transport failure.
     if status == reqwest::StatusCode::UNAUTHORIZED {
-        let www = resp
-            .headers()
-            .get(reqwest::header::WWW_AUTHENTICATE)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        return Err(RequestError::Unauthorized(www));
+        return Err(RequestError::Unauthorized(www_authenticate(&resp)));
     }
 
     // A 404 on a request carrying a session id = expired session → re-init+retry.
@@ -1578,30 +1697,212 @@ async fn http_request_once(
     }
 
     if !status.is_success() {
-        let code = status.as_u16();
-        let snippet: String =
-            read_body_capped(resp.bytes_stream(), MCP_HTTP_ERROR_SNIPPET_BYTES, timeout)
-                .await
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b).chars().take(300).collect())
-                .unwrap_or_default();
-        return Err(RequestError::Transport(if snippet.trim().is_empty() {
-            format!("MCP server returned HTTP {code}")
-        } else {
-            format!("MCP server returned HTTP {code}: {snippet}")
-        }));
+        let bytes = read_body_capped(resp.bytes_stream(), MCP_HTTP_ERROR_SNIPPET_BYTES, timeout)
+            .await
+            .unwrap_or_default();
+        return Err(transport_error_from_body(status.as_u16(), &bytes));
     }
 
-    if content_type.contains("text/event-stream") {
-        read_sse_response(resp.bytes_stream(), id, timeout)
+    read_response_payload(resp, id, timeout).await.map(Some)
+}
+
+/// The `WWW-Authenticate` challenge, for OAuth diagnostics.
+fn www_authenticate(resp: &reqwest::Response) -> Option<String> {
+    resp.headers()
+        .get(reqwest::header::WWW_AUTHENTICATE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// Non-2xx → `Transport` error: HTTP code plus a bounded snippet. One
+/// implementation so the two eras' messages can't drift.
+fn transport_error_from_body(status: u16, bytes: &[u8]) -> RequestError {
+    let snippet: String = String::from_utf8_lossy(bytes).chars().take(300).collect();
+    RequestError::Transport(if snippet.trim().is_empty() {
+        format!("MCP server returned HTTP {status}")
+    } else {
+        format!("MCP server returned HTTP {status}: {snippet}")
+    })
+}
+
+/// POST one stateless (2026-07-28) request: `_meta` plus the
+/// `Mcp-Method`/`Mcp-Name` routing headers. The one envelope builder for both
+/// the probe and the request path — what a server accepted at negotiation must
+/// be what every later call sends.
+async fn post_stateless(
+    io: &mut HttpIo,
+    method: &str,
+    mut params: Value,
+    extra_headers: &[(String, String)],
+    timeout: Duration,
+) -> Result<(u64, reqwest::Response), RequestError> {
+    inject_stateless_meta(&mut params);
+    let mut headers: Vec<(String, String)> = Vec::with_capacity(extra_headers.len() + 2);
+    headers.push(("Mcp-Method".to_string(), method.to_string()));
+    if let Some(h) = mcp_name_header(method, &params) {
+        headers.push(h);
+    }
+    headers.extend(extra_headers.iter().cloned());
+
+    let id = io.next_id;
+    io.next_id += 1;
+    let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let resp = io.post(&body, &headers, timeout).await?;
+    Ok((id, resp))
+}
+
+/// A stateless request's response: no session, no re-initialize dance — any
+/// failure is final for this call.
+async fn http_request_stateless(
+    io: &mut HttpIo,
+    method: &str,
+    params: Value,
+    extra_headers: &[(String, String)],
+    timeout: Duration,
+) -> Result<Value, RequestError> {
+    let (id, resp) = post_stateless(io, method, params, extra_headers, timeout).await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Err(RequestError::Unauthorized(www_authenticate(&resp)));
+    }
+    if !status.is_success() {
+        // A typed JSON-RPC error body means the server is healthy — surface as
+        // `Protocol`, not `Transport` (which would dead-mark it).
+        let bytes =
+            read_body_capped(resp.bytes_stream(), MCP_HTTP_ERROR_SNIPPET_BYTES, timeout).await?;
+        if let Ok(v) = serde_json::from_slice::<Value>(&bytes)
+            && v.get("error").is_some()
+        {
+            return json_rpc_result(&v);
+        }
+        return Err(transport_error_from_body(status.as_u16(), &bytes));
+    }
+    read_response_payload(resp, id, timeout).await
+}
+
+/// Classification of the stateless probe's response (pure — see tests).
+#[derive(Debug, PartialEq)]
+enum ProbeDecision {
+    /// 2xx with a JSON-RPC `result`: the server speaks 2026-07-28.
+    Accept,
+    /// HTTP 401 — OAuth first; negotiation happens after authorization.
+    Unauthorized,
+    /// `-32020`/`-32021`: the server IS modern — falling back to a handshake
+    /// it removed would only bury the real error.
+    ModernError { code: i64, message: String },
+    /// Everything else, incl. `-32022` UnsupportedProtocolVersion (the legacy
+    /// handshake IS the spec's retry-with-a-supported-version): assume
+    /// pre-2026.
+    Fallback,
+}
+
+fn classify_probe(status: u16, body: Option<&Value>) -> ProbeDecision {
+    if status == 401 {
+        return ProbeDecision::Unauthorized;
+    }
+    if let Some(err) = body.and_then(|v| v.get("error")) {
+        return match err.get("code").and_then(|c| c.as_i64()) {
+            Some(code @ (-32020 | -32021)) => ProbeDecision::ModernError {
+                code,
+                message: err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("MCP error")
+                    .to_string(),
+            },
+            _ => ProbeDecision::Fallback,
+        };
+    }
+    if (200..300).contains(&status) && body.is_some_and(|v| v.get("result").is_some()) {
+        return ProbeDecision::Accept;
+    }
+    ProbeDecision::Fallback
+}
+
+/// Probe a fresh connection with one stateless `tools/list`. `Some(list)` ⇒
+/// stateless mode; `None` ⇒ legacy fallback — including transport failures, so
+/// the legacy attempt reports the real error with pre-stateless wording. Errs
+/// only where fallback would be wrong: 401 and modern rejections.
+async fn http_stateless_probe(
+    io: &mut HttpIo,
+    timeout: Duration,
+) -> Result<Option<Value>, RequestError> {
+    io.mode = HttpMode::Stateless;
+    let outcome = http_stateless_probe_once(io, timeout).await;
+    if !matches!(outcome, Ok(Some(_))) {
+        io.mode = HttpMode::Legacy;
+    }
+    outcome
+}
+
+async fn http_stateless_probe_once(
+    io: &mut HttpIo,
+    timeout: Duration,
+) -> Result<Option<Value>, RequestError> {
+    let Ok((id, resp)) = post_stateless(io, "tools/list", json!({}), &[], timeout).await else {
+        return Ok(None); // unreachable/timeout: the legacy attempt reports it
+    };
+    let status = resp.status();
+    let www = www_authenticate(&resp);
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if status.is_success() && content_type.contains("text/event-stream") {
+        // Modern rejections ride 400 JSON bodies, never a 2xx SSE stream —
+        // an unparseable stream means "not this revision".
+        return Ok(read_sse_response(resp.bytes_stream(), id, timeout)
             .await
-            .map(Some)
+            .ok());
+    }
+    // An error body only needs enough for a typed JSON-RPC error object.
+    let cap = if status.is_success() {
+        MCP_MAX_HTTP_BODY_BYTES
+    } else {
+        MCP_HTTP_ERROR_SNIPPET_BYTES
+    };
+    let bytes = read_body_capped(resp.bytes_stream(), cap, timeout)
+        .await
+        .unwrap_or_default();
+    let mut parsed: Option<Value> = serde_json::from_slice(&bytes).ok();
+    match classify_probe(status.as_u16(), parsed.as_ref()) {
+        // Accept ⇒ `result` present — take it rather than re-clone.
+        ProbeDecision::Accept => Ok(parsed
+            .as_mut()
+            .and_then(|v| v.get_mut("result"))
+            .map(Value::take)),
+        ProbeDecision::Unauthorized => Err(RequestError::Unauthorized(www)),
+        ProbeDecision::ModernError { code, message } => Err(RequestError::Protocol {
+            code: Some(code),
+            message: format!("MCP server rejected the stateless request ({code}): {message}"),
+        }),
+        ProbeDecision::Fallback => Ok(None),
+    }
+}
+
+/// 2xx dispatch: a `text/event-stream` SSE stream or a single bounded JSON
+/// body.
+async fn read_response_payload(
+    resp: reqwest::Response,
+    id: u64,
+    timeout: Duration,
+) -> Result<Value, RequestError> {
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type.contains("text/event-stream") {
+        read_sse_response(resp.bytes_stream(), id, timeout).await
     } else {
         // application/json (or unlabeled) single JSON-RPC response, bounded.
         let bytes = read_body_capped(resp.bytes_stream(), MCP_MAX_HTTP_BODY_BYTES, timeout).await?;
         let v: Value = serde_json::from_slice(&bytes)
             .map_err(|e| RequestError::Transport(format!("mcp http response: {e}")))?;
-        json_rpc_result(&v).map(Some)
+        json_rpc_result(&v)
     }
 }
 
@@ -1658,11 +1959,12 @@ where
         .map_err(|_| RequestError::Transport("MCP HTTP response timed out".to_string()))?
 }
 
+/// Legacy-only: the stateless revision has no client-to-server notifications.
 async fn http_notify(io: &mut HttpIo, method: &str) -> Result<(), String> {
     let body = json!({"jsonrpc": "2.0", "method": method, "params": {}});
     // A notification has no id; the server should answer 202 Accepted with no
     // body. We don't read a response — just confirm the POST was delivered.
-    io.post(&body, MCP_CALL_TIMEOUT)
+    io.post(&body, &[], MCP_CALL_TIMEOUT)
         .await
         .map(|_| ())
         .map_err(RequestError::into_message)
@@ -1818,6 +2120,180 @@ async fn read_line_bounded<R: AsyncBufRead + Unpin>(
     Ok(line.map(|v| String::from_utf8_lossy(&v).into_owned()))
 }
 
+/// Merge the mandatory stateless `_meta` (protocol version / client identity /
+/// capabilities) into `params`, preserving sibling keys. The version must
+/// match the `MCP-Protocol-Version` header or the server rejects.
+fn inject_stateless_meta(params: &mut Value) {
+    if !params.is_object() {
+        *params = json!({});
+    }
+    let obj = params.as_object_mut().expect("coerced to an object above");
+    let meta = obj.entry("_meta").or_insert_with(|| json!({}));
+    if !meta.is_object() {
+        *meta = json!({});
+    }
+    let meta = meta.as_object_mut().expect("coerced to an object above");
+    meta.insert(
+        "io.modelcontextprotocol/protocolVersion".to_string(),
+        json!(MCP_STATELESS_PROTOCOL_VERSION),
+    );
+    meta.insert(
+        "io.modelcontextprotocol/clientInfo".to_string(),
+        json!({"name": "aivo", "version": env!("CARGO_PKG_VERSION")}),
+    );
+    meta.insert(
+        "io.modelcontextprotocol/clientCapabilities".to_string(),
+        json!({}),
+    );
+}
+
+/// The `Mcp-Name` routing header, required on methods that target a named
+/// thing.
+fn mcp_name_header(method: &str, params: &Value) -> Option<(String, String)> {
+    let value = match method {
+        "tools/call" | "prompts/get" => params.get("name")?.as_str()?,
+        "resources/read" => params.get("uri")?.as_str()?,
+        _ => return None,
+    };
+    Some(("Mcp-Name".to_string(), encode_header_text(value)))
+}
+
+/// 2026-07-28 header-value encoding: plain safe ASCII passes through; anything
+/// else (or a sentinel-shaped literal) becomes `=?base64?…?=`.
+fn encode_header_text(s: &str) -> String {
+    let sentinel_shaped = s.starts_with("=?base64?") && s.ends_with("?=");
+    let safe = !s.is_empty()
+        && s.bytes().all(|b| (0x20..=0x7e).contains(&b))
+        && !s.starts_with(' ')
+        && !s.ends_with(' ')
+        && !sentinel_shaped;
+    if safe {
+        s.to_string()
+    } else {
+        format!("=?base64?{}?=", BASE64.encode(s.as_bytes()))
+    }
+}
+
+/// RFC 9110 `token` syntax — what an `x-mcp-header` name must satisfy.
+fn is_rfc9110_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// One `x-mcp-header` annotation: the argument at `path` becomes the
+/// `Mcp-Param-{name}` header.
+#[derive(Clone, Debug, PartialEq)]
+struct HeaderParam {
+    name: String,
+    path: Vec<String>,
+    kind: HeaderParamKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum HeaderParamKind {
+    Str,
+    Int,
+    Bool,
+}
+
+/// Collect a tool's `x-mcp-header` annotations per the 2026-07-28 constraints.
+/// `Err` ⇒ the whole tool MUST be excluded from the advertised set.
+fn collect_header_params(schema: &Value) -> Result<Vec<HeaderParam>, String> {
+    // Counts annotations anywhere; compared against the `properties`-only walk
+    // to catch ones hidden where the spec forbids them (`items`, `oneOf`, …).
+    fn count_annotations(v: &Value) -> usize {
+        match v {
+            Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| usize::from(k == "x-mcp-header") + count_annotations(v))
+                .sum(),
+            Value::Array(arr) => arr.iter().map(count_annotations).sum(),
+            _ => 0,
+        }
+    }
+    fn walk(
+        schema: &Value,
+        prefix: &mut Vec<String>,
+        out: &mut Vec<HeaderParam>,
+    ) -> Result<(), String> {
+        let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+            return Ok(());
+        };
+        for (prop_name, prop) in props {
+            if let Some(h) = prop.get("x-mcp-header") {
+                let name = h
+                    .as_str()
+                    .ok_or_else(|| format!("x-mcp-header on `{prop_name}` must be a string"))?;
+                if !is_rfc9110_token(name) {
+                    return Err(format!(
+                        "x-mcp-header name `{name}` on `{prop_name}` is not a valid header token"
+                    ));
+                }
+                let kind = match prop.get("type").and_then(|t| t.as_str()) {
+                    Some("string") => HeaderParamKind::Str,
+                    Some("integer") => HeaderParamKind::Int,
+                    Some("boolean") => HeaderParamKind::Bool,
+                    other => {
+                        return Err(format!(
+                            "x-mcp-header on `{prop_name}` requires a string/integer/boolean type, got {}",
+                            other.unwrap_or("none")
+                        ));
+                    }
+                };
+                let mut path = prefix.clone();
+                path.push(prop_name.clone());
+                out.push(HeaderParam {
+                    name: name.to_string(),
+                    path,
+                    kind,
+                });
+            }
+            // Only `properties` chains are reachable.
+            prefix.push(prop_name.clone());
+            walk(prop, prefix, out)?;
+            prefix.pop();
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(schema, &mut Vec::new(), &mut out)?;
+    let mut seen = HashSet::new();
+    for p in &out {
+        if !seen.insert(p.name.to_ascii_lowercase()) {
+            return Err(format!("duplicate x-mcp-header name `{}`", p.name));
+        }
+    }
+    if count_annotations(schema) != out.len() {
+        return Err(
+            "x-mcp-header annotation in an unreachable position (only `properties` chains are allowed)"
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
+/// The `Mcp-Param-*` headers for one call; an absent / null / wrongly-typed
+/// value omits its header.
+fn header_params_to_headers(params: &[HeaderParam], args: &Value) -> Vec<(String, String)> {
+    params
+        .iter()
+        .filter_map(|p| {
+            let mut v = args;
+            for key in &p.path {
+                v = v.get(key)?;
+            }
+            let value = match (p.kind, v) {
+                (HeaderParamKind::Str, Value::String(s)) => encode_header_text(s),
+                (HeaderParamKind::Int, Value::Number(n)) => n.as_i64()?.to_string(),
+                (HeaderParamKind::Bool, Value::Bool(b)) => b.to_string(),
+                _ => return None,
+            };
+            Some((format!("Mcp-Param-{}", p.name), value))
+        })
+        .collect()
+}
+
 fn parse_tools(list: &Value) -> Vec<McpTool> {
     let Some(arr) = list.get("tools").and_then(|t| t.as_array()) else {
         return Vec::new();
@@ -1848,9 +2324,30 @@ fn parse_tools(list: &Value) -> Vec<McpTool> {
                     .filter(|v| v.is_object())
                     .cloned()
                     .unwrap_or_else(|| json!({"type": "object"})),
+                header_params: Vec::new(),
             })
         })
         .collect()
+}
+
+/// Post-pass over [`parse_tools`]: validate `x-mcp-header` annotations,
+/// excluding invalid tools (spec MUST) with a warning.
+fn parse_tools_stateless(list: &Value) -> (Vec<McpTool>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let tools = parse_tools(list)
+        .into_iter()
+        .filter_map(|mut t| match collect_header_params(&t.input_schema) {
+            Ok(params) => {
+                t.header_params = params;
+                Some(t)
+            }
+            Err(reason) => {
+                warnings.push(format!("tool `{}` excluded: {reason}", t.name));
+                None
+            }
+        })
+        .collect();
+    (tools, warnings)
 }
 
 /// Concatenate the text parts of an MCP `tools/call` result; fall back to the raw
@@ -2287,7 +2784,13 @@ mod tests {
         let err = read_sse_response(stream, 1, Duration::from_secs(5))
             .await
             .unwrap_err();
-        assert!(matches!(err, RequestError::Protocol(m) if m == "nope"));
+        assert!(matches!(
+            err,
+            RequestError::Protocol {
+                code: Some(-32601),
+                message: m,
+            } if m == "nope"
+        ));
     }
 
     #[tokio::test]
@@ -3171,6 +3674,651 @@ for line in sys.stdin:
             started.elapsed() < Duration::from_secs(5),
             "handshake timeout was not honored (took {:?})",
             started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Stateless (2026-07-28) helpers: pure tests ----
+
+    #[test]
+    fn classify_probe_matrix() {
+        use ProbeDecision as D;
+        let err = |code: i64| json!({"error": {"code": code, "message": "m"}});
+        // 401 wins regardless of body.
+        assert_eq!(classify_probe(401, Some(&err(-32020))), D::Unauthorized);
+        assert_eq!(classify_probe(401, None), D::Unauthorized);
+        // Modern typed rejections: no fallback.
+        assert_eq!(
+            classify_probe(400, Some(&err(-32020))),
+            D::ModernError {
+                code: -32020,
+                message: "m".into()
+            }
+        );
+        assert_eq!(
+            classify_probe(400, Some(&err(-32021))),
+            D::ModernError {
+                code: -32021,
+                message: "m".into()
+            }
+        );
+        // Success with a JSON-RPC result.
+        assert_eq!(
+            classify_probe(200, Some(&json!({"result": {"tools": []}}))),
+            D::Accept
+        );
+        // Everything else falls back — incl. -32022, 404 (even with -32601),
+        // and old servers' "not initialized" errors.
+        assert_eq!(classify_probe(400, None), D::Fallback);
+        assert_eq!(classify_probe(400, Some(&err(-32022))), D::Fallback);
+        assert_eq!(classify_probe(200, Some(&err(-32002))), D::Fallback);
+        assert_eq!(classify_probe(404, Some(&err(-32601))), D::Fallback);
+        assert_eq!(classify_probe(404, None), D::Fallback);
+        assert_eq!(classify_probe(500, None), D::Fallback);
+        assert_eq!(classify_probe(200, Some(&json!({"ok": true}))), D::Fallback);
+    }
+
+    #[test]
+    fn inject_stateless_meta_shapes() {
+        // Empty params gain the full _meta triple.
+        let mut p = json!({});
+        inject_stateless_meta(&mut p);
+        assert_eq!(
+            p["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            MCP_STATELESS_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            p["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+            "aivo"
+        );
+        assert!(p["_meta"]["io.modelcontextprotocol/clientCapabilities"].is_object());
+        // Sibling params and pre-existing _meta keys survive.
+        let mut p = json!({"name": "t", "_meta": {"traceparent": "00-abc"}});
+        inject_stateless_meta(&mut p);
+        assert_eq!(p["name"], "t");
+        assert_eq!(p["_meta"]["traceparent"], "00-abc");
+        assert_eq!(
+            p["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            MCP_STATELESS_PROTOCOL_VERSION
+        );
+        // Non-object params are replaced, not panicked on.
+        let mut p = json!(null);
+        inject_stateless_meta(&mut p);
+        assert!(p["_meta"].is_object());
+    }
+
+    #[test]
+    fn encode_header_text_sentinel_rules() {
+        // Plain ASCII passes through.
+        assert_eq!(encode_header_text("us-west1"), "us-west1");
+        assert_eq!(encode_header_text("a b"), "a b");
+        // Non-ASCII → base64 sentinel (spec's own example).
+        assert_eq!(
+            encode_header_text("Hello, 世界"),
+            "=?base64?SGVsbG8sIOS4lueVjA==?="
+        );
+        // Leading/trailing whitespace → encoded (spec's own example).
+        assert_eq!(encode_header_text(" padded "), "=?base64?IHBhZGRlZCA=?=");
+        // Control characters → encoded (spec's own example).
+        assert_eq!(
+            encode_header_text("line1\nline2"),
+            "=?base64?bGluZTEKbGluZTI=?="
+        );
+        // A literal that matches the sentinel pattern must itself be encoded.
+        assert_eq!(
+            encode_header_text("=?base64?literal?="),
+            "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?="
+        );
+    }
+
+    #[test]
+    fn collect_header_params_accepts_and_rejects() {
+        let ok = |schema: Value| collect_header_params(&schema).unwrap();
+        let rejected = |schema: Value| collect_header_params(&schema).unwrap_err();
+
+        // Basic accept, including a nested properties→properties chain.
+        let params = ok(json!({"type": "object", "properties": {
+            "region": {"type": "string", "x-mcp-header": "Region"},
+            "opts": {"type": "object", "properties": {
+                "retries": {"type": "integer", "x-mcp-header": "Retries"},
+                "fast": {"type": "boolean", "x-mcp-header": "Fast"}
+            }}
+        }}));
+        assert_eq!(params.len(), 3);
+        let retries = params.iter().find(|p| p.name == "Retries").unwrap();
+        assert_eq!(retries.path, vec!["opts", "retries"]);
+        assert_eq!(retries.kind, HeaderParamKind::Int);
+
+        // No annotations → empty, not an error.
+        assert!(ok(json!({"type": "object"})).is_empty());
+
+        // `number` type is explicitly forbidden.
+        rejected(json!({"properties": {"x": {"type": "number", "x-mcp-header": "X"}}}));
+        // Missing type.
+        rejected(json!({"properties": {"x": {"x-mcp-header": "X"}}}));
+        // Empty / non-token header names.
+        rejected(json!({"properties": {"x": {"type": "string", "x-mcp-header": ""}}}));
+        rejected(json!({"properties": {"x": {"type": "string", "x-mcp-header": "Bad Name"}}}));
+        rejected(json!({"properties": {"x": {"type": "string", "x-mcp-header": 42}}}));
+        // Case-insensitive duplicate.
+        rejected(json!({"properties": {
+            "a": {"type": "string", "x-mcp-header": "Region"},
+            "b": {"type": "string", "x-mcp-header": "region"}
+        }}));
+        // Annotations hidden under `items` / composition keywords / `$ref`.
+        rejected(json!({"properties": {"list": {"type": "array",
+            "items": {"type": "string", "x-mcp-header": "X"}}}}));
+        rejected(json!({"properties": {"x": {"oneOf": [
+            {"type": "string", "x-mcp-header": "X"}]}}}));
+        rejected(json!({"$defs": {"r": {"properties":
+            {"x": {"type": "string", "x-mcp-header": "X"}}}},
+            "properties": {"x": {"$ref": "#/$defs/r"}}}));
+    }
+
+    #[test]
+    fn header_params_to_headers_omission_rules() {
+        let params = vec![
+            HeaderParam {
+                name: "Region".into(),
+                path: vec!["region".into()],
+                kind: HeaderParamKind::Str,
+            },
+            HeaderParam {
+                name: "N".into(),
+                path: vec!["n".into()],
+                kind: HeaderParamKind::Int,
+            },
+            HeaderParam {
+                name: "Fast".into(),
+                path: vec!["opts".into(), "fast".into()],
+                kind: HeaderParamKind::Bool,
+            },
+            HeaderParam {
+                name: "Gone".into(),
+                path: vec!["gone".into()],
+                kind: HeaderParamKind::Str,
+            },
+            HeaderParam {
+                name: "Null".into(),
+                path: vec!["nil".into()],
+                kind: HeaderParamKind::Str,
+            },
+            HeaderParam {
+                name: "Wrong".into(),
+                path: vec!["n".into()],
+                kind: HeaderParamKind::Str,
+            },
+        ];
+        let headers = header_params_to_headers(
+            &params,
+            &json!({"region": "us", "n": -7, "opts": {"fast": true}, "nil": null}),
+        );
+        assert_eq!(
+            headers,
+            vec![
+                ("Mcp-Param-Region".to_string(), "us".to_string()),
+                ("Mcp-Param-N".to_string(), "-7".to_string()),
+                ("Mcp-Param-Fast".to_string(), "true".to_string()),
+            ],
+            "absent / null / type-mismatched values omit their headers"
+        );
+    }
+
+    #[test]
+    fn parse_tools_stateless_excludes_only_invalid_tools() {
+        let list = json!({"tools": [
+            {"name": "good", "description": "g", "inputSchema": {"type": "object",
+                "properties": {"r": {"type": "string", "x-mcp-header": "R"}}}},
+            {"name": "bad", "description": "b", "inputSchema": {"type": "object",
+                "properties": {"x": {"type": "number", "x-mcp-header": "X"}}}},
+            {"name": "plain", "description": "p", "inputSchema": {"type": "object"}}
+        ]});
+        let (tools, warnings) = parse_tools_stateless(&list);
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["good", "plain"], "only the invalid tool is dropped");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("bad"),
+            "warning names the tool: {}",
+            warnings[0]
+        );
+        // The legacy parser never validates (old servers never get param headers).
+        assert_eq!(parse_tools(&list).len(), 3);
+    }
+
+    // ---- Stateless (2026-07-28) HTTP transport: mock-server e2e ----
+
+    /// A scripted HTTP MCP server: `respond(seq, raw_request)` returns
+    /// `(status, extra_header_block, json_body)`; raw requests are captured.
+    struct MockMcp {
+        requests: std::sync::Mutex<Vec<String>>,
+        #[allow(clippy::type_complexity)]
+        respond: Box<dyn Fn(usize, &str) -> (u16, String, String) + Send + Sync>,
+    }
+
+    impl MockMcp {
+        fn count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+        fn body(&self, seq: usize) -> Value {
+            let raw = self.requests.lock().unwrap()[seq].clone();
+            let body = crate::services::http_utils::extract_request_body(&raw).unwrap_or_default();
+            serde_json::from_str(body).unwrap_or(Value::Null)
+        }
+        /// Header value, matched headers-only so body text can't false-positive.
+        fn header(&self, seq: usize, name: &str) -> Option<String> {
+            let raw = self.requests.lock().unwrap()[seq].clone();
+            let head = raw.split("\r\n\r\n").next().unwrap_or("").to_string();
+            crate::services::http_utils::header_value(&head, name).map(str::to_string)
+        }
+        fn saw_method(&self, method: &str) -> bool {
+            (0..self.count()).any(|i| self.body(i)["method"] == method)
+        }
+    }
+
+    async fn spawn_mock_mcp(
+        respond: impl Fn(usize, &str) -> (u16, String, String) + Send + Sync + 'static,
+    ) -> (String, Arc<MockMcp>) {
+        use crate::services::http_utils::{bind_local_listener, http_response_head_with_extra};
+        let (listener, port) = bind_local_listener().await.unwrap();
+        let state = Arc::new(MockMcp {
+            requests: std::sync::Mutex::new(Vec::new()),
+            respond: Box::new(respond),
+        });
+        let server_state = Arc::clone(&state);
+        tokio::spawn(crate::services::http_utils::run_streaming_router(
+            listener,
+            server_state,
+            |request, state: Arc<MockMcp>, mut socket| async move {
+                let seq = {
+                    let mut reqs = state.requests.lock().unwrap();
+                    reqs.push(request.clone());
+                    reqs.len() - 1
+                };
+                let (status, extra, body) = (state.respond)(seq, &request);
+                let head =
+                    http_response_head_with_extra(status, "application/json", body.len(), &extra);
+                use tokio::io::AsyncWriteExt as _;
+                let _ = socket.write_all(head.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+            },
+        ));
+        (format!("http://127.0.0.1:{port}/mcp"), state)
+    }
+
+    /// Connect a single HTTP server named `m` at `url` via a project `.mcp.json`.
+    async fn connect_mock(url: &str) -> (McpClient, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "aivo-mcp-http-{}-{url_hash}",
+            std::process::id(),
+            url_hash = url.rsplit(':').next().unwrap_or("0").replace('/', "-")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = json!({"mcpServers": {"m": {"url": url}}});
+        std::fs::write(dir.join(".mcp.json"), config.to_string()).unwrap();
+        let client = McpClient::connect_isolated(&dir, &HashSet::new()).await;
+        (client, dir)
+    }
+
+    fn json_rpc_ok(raw_request: &str, result: Value) -> String {
+        let id = crate::services::http_utils::extract_request_body(raw_request)
+            .ok()
+            .and_then(|b| serde_json::from_str::<Value>(b).ok())
+            .and_then(|v| v.get("id").cloned())
+            .unwrap_or(Value::Null);
+        json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
+    }
+
+    fn tools_result(tools: Value) -> Value {
+        json!({"resultType": "complete", "ttlMs": 60000, "cacheScope": "private", "tools": tools})
+    }
+
+    #[tokio::test]
+    async fn stateless_server_connects_without_initialize() {
+        let (url, mock) = spawn_mock_mcp(|_seq, req| {
+            (
+                200,
+                String::new(),
+                json_rpc_ok(
+                    req,
+                    tools_result(
+                        json!([{"name":"echo","description":"e","inputSchema":{"type":"object"}}]),
+                    ),
+                ),
+            )
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        assert_eq!(
+            client.tool_count("m"),
+            Some(1),
+            "errors: {:?}",
+            client.errors()
+        );
+        assert_eq!(mock.count(), 1, "stateless connect is exactly one request");
+        assert!(
+            !mock.saw_method("initialize"),
+            "no handshake in stateless mode"
+        );
+        assert_eq!(
+            mock.header(0, "MCP-Protocol-Version").as_deref(),
+            Some("2026-07-28")
+        );
+        assert_eq!(mock.header(0, "Mcp-Method").as_deref(), Some("tools/list"));
+        assert!(mock.header(0, "Mcp-Session-Id").is_none());
+        let meta = &mock.body(0)["params"]["_meta"];
+        assert_eq!(
+            meta["io.modelcontextprotocol/protocolVersion"],
+            "2026-07-28"
+        );
+        assert_eq!(meta["io.modelcontextprotocol/clientInfo"]["name"], "aivo");
+        assert!(meta["io.modelcontextprotocol/clientCapabilities"].is_object());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stateless_tools_call_round_trip() {
+        let (url, mock) = spawn_mock_mcp(|seq, req| {
+            let result = match seq {
+                0 => tools_result(json!([{
+                    "name": "get_weather",
+                    "description": "w",
+                    "inputSchema": {"type": "object", "properties": {
+                        "region": {"type": "string", "x-mcp-header": "Region"},
+                        "q": {"type": "string"}
+                    }}
+                }])),
+                _ => json!({"resultType": "complete", "content": [{"type": "text", "text": "sunny"}]}),
+            };
+            (200, String::new(), json_rpc_ok(req, result))
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        let out = client
+            .call(
+                "mcp__m__get_weather",
+                &json!({"region": "us-west1", "q": "x"}),
+            )
+            .await
+            .expect("call should succeed");
+        assert!(out.contains("sunny"), "result text missing: {out}");
+        assert_eq!(mock.header(1, "Mcp-Method").as_deref(), Some("tools/call"));
+        assert_eq!(mock.header(1, "Mcp-Name").as_deref(), Some("get_weather"));
+        assert_eq!(
+            mock.header(1, "Mcp-Param-Region").as_deref(),
+            Some("us-west1")
+        );
+        assert_eq!(
+            mock.body(1)["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+            "2026-07-28"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn legacy_fallback_after_400_empty_body() {
+        let (url, mock) = spawn_mock_mcp(|seq, req| {
+            match seq {
+                // The modern probe: reject like a pre-2026 server (empty 400).
+                0 => (400, String::new(), String::new()),
+                1 => (
+                    200,
+                    "Mcp-Session-Id: s1".to_string(),
+                    json_rpc_ok(
+                        req,
+                        json!({"protocolVersion": "2025-03-26", "capabilities": {},
+                        "serverInfo": {"name": "legacy", "version": "1"}}),
+                    ),
+                ),
+                2 => (202, String::new(), String::new()),
+                3 => (
+                    200,
+                    String::new(),
+                    json_rpc_ok(
+                        req,
+                        json!({"tools": [{"name": "echo", "description": "e",
+                        "inputSchema": {"type": "object"}}]}),
+                    ),
+                ),
+                _ => (
+                    200,
+                    String::new(),
+                    json_rpc_ok(
+                        req,
+                        json!({"content": [{"type": "text", "text": "legacy-ok"}]}),
+                    ),
+                ),
+            }
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        assert_eq!(
+            client.tool_count("m"),
+            Some(1),
+            "errors: {:?}",
+            client.errors()
+        );
+        let methods: Vec<String> = (0..mock.count())
+            .map(|i| mock.body(i)["method"].as_str().unwrap_or("?").to_string())
+            .collect();
+        assert_eq!(
+            methods,
+            [
+                "tools/list",
+                "initialize",
+                "notifications/initialized",
+                "tools/list"
+            ],
+            "modern probe first, then the full legacy handshake"
+        );
+        assert_eq!(
+            mock.header(1, "MCP-Protocol-Version").as_deref(),
+            Some("2025-03-26")
+        );
+        assert_eq!(mock.body(1)["params"]["protocolVersion"], "2025-03-26");
+        assert!(
+            mock.body(3)["params"].get("_meta").is_none(),
+            "legacy requests carry no stateless _meta"
+        );
+        assert_eq!(
+            mock.header(3, "Mcp-Session-Id").as_deref(),
+            Some("s1"),
+            "legacy session id echoed after initialize"
+        );
+
+        let out = client
+            .call("mcp__m__echo", &json!({}))
+            .await
+            .expect("legacy call");
+        assert!(out.contains("legacy-ok"));
+        assert_eq!(mock.header(4, "Mcp-Session-Id").as_deref(), Some("s1"));
+        assert!(
+            mock.header(4, "Mcp-Method").is_none(),
+            "no routing headers in legacy mode"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn modern_probe_401_marks_needs_auth() {
+        let (url, mock) = spawn_mock_mcp(|_seq, _req| {
+            (
+                401,
+                "WWW-Authenticate: Bearer resource_metadata=\"https://x/.well-known/oauth-protected-resource\"".to_string(),
+                String::new(),
+            )
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        assert!(client.needs_auth("m"), "401 on the probe is needs-auth");
+        assert!(
+            !mock.saw_method("initialize"),
+            "auth precedes protocol fallback"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn header_mismatch_refetches_and_retries_once() {
+        let schema_with = |header: &str| {
+            tools_result(json!([{
+                "name": "t", "description": "d",
+                "inputSchema": {"type": "object", "properties": {
+                    "region": {"type": "string", "x-mcp-header": header}
+                }}
+            }]))
+        };
+        let (url, mock) = spawn_mock_mcp(move |seq, req| match seq {
+            0 => (200, String::new(), json_rpc_ok(req, schema_with("Region"))),
+            1 => (
+                400,
+                String::new(),
+                json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32020,
+                    "message": "Header mismatch: expected Mcp-Param-Zone"}})
+                .to_string(),
+            ),
+            2 => (200, String::new(), json_rpc_ok(req, schema_with("Zone"))),
+            _ => (
+                200,
+                String::new(),
+                json_rpc_ok(
+                    req,
+                    json!({"resultType": "complete",
+                    "content": [{"type": "text", "text": "retried-ok"}]}),
+                ),
+            ),
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        let out = client
+            .call("mcp__m__t", &json!({"region": "eu"}))
+            .await
+            .expect("retry after HeaderMismatch should succeed");
+        assert!(out.contains("retried-ok"));
+        assert_eq!(
+            mock.header(1, "Mcp-Param-Region").as_deref(),
+            Some("eu"),
+            "first attempt, stale header"
+        );
+        assert_eq!(
+            mock.body(2)["method"],
+            "tools/list",
+            "refetch between attempts"
+        );
+        assert_eq!(
+            mock.header(3, "Mcp-Param-Zone").as_deref(),
+            Some("eu"),
+            "retry carries the fresh header"
+        );
+        assert!(
+            !client.is_dead("m"),
+            "a typed 400 must not dead-mark the server"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn input_required_is_clear_error_not_dead() {
+        let (url, mock) = spawn_mock_mcp(|seq, req| {
+            let result = match seq {
+                0 => tools_result(json!([{"name":"t","description":"d","inputSchema":{"type":"object"}}])),
+                1 => json!({"resultType": "input_required",
+                    "inputRequests": [{"method": "elicitation/create"}]}),
+                _ => json!({"resultType": "complete", "content": [{"type": "text", "text": "plain"}]}),
+            };
+            (200, String::new(), json_rpc_ok(req, result))
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        let err = client.call("mcp__m__t", &json!({})).await.unwrap_err();
+        assert!(err.contains("input_required"), "unclear MRTR error: {err}");
+        assert!(!client.is_dead("m"));
+        let out = client
+            .call("mcp__m__t", &json!({}))
+            .await
+            .expect("server stays usable");
+        assert!(out.contains("plain"));
+        assert!(mock.count() >= 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn modern_error_32021_fails_without_fallback() {
+        let (url, mock) = spawn_mock_mcp(|_seq, _req| {
+            (
+                400,
+                String::new(),
+                json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32021,
+                    "message": "client capability `elicitation` is required"}})
+                .to_string(),
+            )
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        assert!(!client.has_tools());
+        assert!(!client.needs_auth("m"));
+        let err = client
+            .error_for("m")
+            .expect("modern rejection is a connect error");
+        assert!(err.contains("-32021"), "error should name the code: {err}");
+        assert!(
+            !mock.saw_method("initialize"),
+            "a modern server must not get the legacy handshake"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn unsupported_version_falls_back() {
+        let (url, mock) = spawn_mock_mcp(|seq, req| match seq {
+            0 => (
+                400,
+                String::new(),
+                json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32022,
+                    "message": "unsupported protocol version",
+                    "data": {"supported": ["2025-03-26", "2025-11-25"]}}})
+                .to_string(),
+            ),
+            1 => (
+                200,
+                String::new(),
+                json_rpc_ok(
+                    req,
+                    json!({"protocolVersion": "2025-03-26", "capabilities": {},
+                    "serverInfo": {"name": "old", "version": "1"}}),
+                ),
+            ),
+            2 => (202, String::new(), String::new()),
+            _ => (
+                200,
+                String::new(),
+                json_rpc_ok(
+                    req,
+                    json!({"tools": [{"name": "echo", "description": "e",
+                    "inputSchema": {"type": "object"}}]}),
+                ),
+            ),
+        })
+        .await;
+        let (client, dir) = connect_mock(&url).await;
+
+        assert_eq!(
+            client.tool_count("m"),
+            Some(1),
+            "errors: {:?}",
+            client.errors()
+        );
+        assert!(
+            mock.saw_method("initialize"),
+            "-32022 (server doesn't speak 2026-07-28) → legacy"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

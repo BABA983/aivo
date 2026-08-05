@@ -813,6 +813,9 @@ impl CodeTuiApp {
                 )
             };
             self.notice = Some((WARNING(), msg));
+        } else if let Some((source, reason)) = client.warnings().first() {
+            // Advisory from a healthy server — informational, not a failure.
+            self.notice = Some(info_notice(format!("MCP {source}: {reason}")));
         }
         let has_tools = client.has_tools();
         self.mcp_client = Some(client);

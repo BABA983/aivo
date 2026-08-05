@@ -33,6 +33,19 @@ fn sandbox_process_env() {
         // Would otherwise leak into spawned aivo children that set their own
         // per-test HOME, collapsing their isolation onto one shared config dir.
         std::env::remove_var("AIVO_CONFIG_DIR");
+        // Ambient proxies would swallow 127.0.0.1 mock traffic. (Mirrors
+        // PROXY_VARS in src/plugin/endpoint.rs — this std-only file can't
+        // import the lib const.)
+        for var in [
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "all_proxy",
+        ] {
+            std::env::remove_var(var);
+        }
     }
 }
 
