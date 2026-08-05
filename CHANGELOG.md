@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.43.4
+
+A transparency patch. `--transparent` now forces a direct upstream connection for `claude`, `codex`, `gemini`, and `opencode`, not just pi, and the code agent's self-verification is backed by the actual tool log instead of recall. Also: tool results render on their call rows, and glob/grep walks no longer freeze the TUI.
+
+- feat(run): extend `--transparent` beyond pi to claude/codex/gemini/opencode (812e77be)
+- feat(code): evidence-gated verification with a durable log-derived digest (83864bed)
+- improve(code): merge tool results onto their call rows (885046ab)
+- improve(code): label the update_plan checklist "Tasks", reserving "Plan" for plan mode (d04b4c19)
+- fix(code): glob/grep walks froze the whole TUI on the current-thread runtime (4a53f042)
+
 ## v0.43.3
 
 A delegation and reasoning-control patch. Sub-agent delegation gets bounded worktree diffs and per-agent effort, `aivo codex` grows an `--effort` flag backed by a truthful model catalog, and `serve -k cursor` can run model-only for tool-less clients. Also: `/rewind` reverts files in cursor ACP sessions, `aivo login --reauth`, and fixes for cursor `set_model` catalog misses, engine-rebuild state loss, and CJK wrapping.
