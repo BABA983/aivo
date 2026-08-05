@@ -3,6 +3,7 @@
 //! Best-effort only; the caller must be prepared to fall back to printing
 //! the URL and asking the user to paste the callback URL back.
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "macos")]
@@ -18,9 +19,6 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "linux")]
 pub fn open_url(url: &str) -> std::io::Result<()> {
-    // Try xdg-open first, then sensible-browser. Either failing means the
-    // environment lacks a desktop integration; the caller will prompt for a
-    // manual paste.
     if let Ok(child) = Command::new("xdg-open")
         .arg(url)
         .stdin(Stdio::null())
@@ -42,18 +40,36 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 pub fn open_url(url: &str) -> std::io::Result<()> {
-    // NOT `cmd /C start`: cmd reparses the command line, so a URL's `&` becomes a
-    // command separator (truncating every OAuth authorize URL after the first
-    // query param) and `%xx` percent-encodings get env-expanded. `explorer.exe`
-    // receives argv directly and hands the whole URL to the default protocol
-    // handler. It exits 1 even on success, so the ignored status is fine.
-    Command::new("explorer")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(|_| ())
+    // `cmd /C start` reparses `&`/`%xx`; `explorer.exe` rejects query-string
+    // URLs. ShellExecuteW passes the URL through intact.
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |s: &str| {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    };
+    let operation = wide("open");
+    let file = wide(url);
+    const SW_SHOWNORMAL: i32 = 1;
+    let code = unsafe {
+        windows_sys::Win32::UI::Shell::ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    // success is > 32; anything else an SE_ERR_* code
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ShellExecuteW failed (code {code})"
+        )))
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
